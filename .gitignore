@@ -1,0 +1,43 @@
+# ── 运行时依赖 ──
+node_modules/
+frontend/node_modules/
+
+# ── Python 运行时 ──
+__pycache__/
+*.pyc
+*.pyo
+backend/cache/
+backend/build/
+backend/*.log
+
+# ── 构建输出 ──
+release/
+frontend/dist/
+electron/dist-backend/
+
+# ── 临时文件 ──
+*.log
+frontend/err.txt
+frontend/public/bg.png
+
+# ── 打包产物 ──
+*.asar
+*.exe
+*.msi
+*.dmg
+
+# ── 系统文件 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 环境 / 密钥 ──
+.env
+.env.local
+*.secret
+
+# ── IDE ──
+.idea/
+.vscode/
+*.swp
+*.swo
