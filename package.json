@@ -1,0 +1,15 @@
+{
+  "name": "haizhe-music",
+  "version": "1.0.0",
+  "description": "海蜇音乐 - 个人音乐播放器",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "build:frontend": "cd frontend && npm run build"
+  },
+  "devDependencies": {
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "appId": "com.haizhe.music",
+  "productName": "HaiZhe Music",
+  "directories": { "output": "release" },
+  "files": [
+    "electron/**/*",
+    "frontend/dist/**/*",
+    "package.json"
+  ],
+  "extraResources": [
+    { "from": "backend", "to": "backend" }
+  ],
+  "win": {
+    "target": "portable",
+    "icon": "electron/cat-icon.ico"
+  },
+  "portable": {
+    "artifactName": "HaiZhe-Music.exe"
+  }
+}
