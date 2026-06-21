@@ -113,15 +113,20 @@ async def stream_audio(song_id: str, request: Request):
     chunk_size = end - start + 1
 
     def file_iterator():
-        with open(filepath, "rb") as f:
-            f.seek(start)
-            remaining = chunk_size
-            while remaining > 0:
-                buf = f.read(min(STREAM_BUF, remaining))
-                if not buf:
-                    break
-                remaining -= len(buf)
-                yield buf
+        try:
+            with open(filepath, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    buf = f.read(min(STREAM_BUF, remaining))
+                    if not buf:
+                        break
+                    remaining -= len(buf)
+                    yield buf
+        except Exception as e:
+            # V10.3: 磁盘 I/O 异常（杀软拦截/文件锁定）会导致流媒体静默中断
+            # 浏览器端只看到截断的响应，不会触发 error 事件 → 播放器卡死无声
+            print(f"[Stream] 流媒体传输中断: {e}")
 
     return StreamingResponse(
         file_iterator(), status_code=206, media_type="audio/mpeg",
@@ -238,7 +243,10 @@ if __name__ == "__main__":
     import uvicorn
     import logging
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    # V10.2: 移除 limit_max_requests — worker 重启会导致流媒体中断
+    # 引发前端 MEDIA_ERR_NETWORK → 错误处理器无限切歌的死亡螺旋
+    # 个人音乐播放器无需 worker 回收；Python GC 每 5 分钟运行足够
     uvicorn.run(
         app, host="0.0.0.0", port=8765, log_level="warning",
-        timeout_keep_alive=30, limit_concurrency=50, limit_max_requests=5000,
+        timeout_keep_alive=30, limit_concurrency=50,
     )

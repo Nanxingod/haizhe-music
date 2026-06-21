@@ -25,6 +25,11 @@ function startBackend() {
     cwd: backendDir, stdio: 'ignore', windowsHide: true, shell: true,
   });
   backendProc.on('error', (err) => console.error('[Backend] 启动失败:', err.message));
+  // V10.3: 记录后端退出信息（崩溃/被杀时能排查原因）
+  backendProc.on('exit', (code, signal) => {
+    if (code !== 0 && code !== null) console.error(`[Backend] 异常退出: code=${code}`);
+    if (signal) console.error(`[Backend] 被信号终止: ${signal}`);
+  });
 }
 
 // ── 启动前端（Vite） ──
@@ -34,6 +39,10 @@ function startFrontend() {
     cwd: frontendDir, stdio: 'ignore', windowsHide: true, shell: true,
   });
   frontendProc.on('error', (err) => console.error('[Frontend] 启动失败:', err.message));
+  frontendProc.on('exit', (code, signal) => {
+    if (code !== 0 && code !== null) console.error(`[Frontend] 异常退出: code=${code}`);
+    if (signal) console.error(`[Frontend] 被信号终止: ${signal}`);
+  });
 }
 
 // ── 清理所有子进程 ──
