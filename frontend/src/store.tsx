@@ -1,5 +1,5 @@
 ﻿// 音乐播放器 - 全局播放器状态管理
-// V10：V9 改进 + 播放记忆持久化 + 歌曲删除容错
+// V10.3：V10.2 + 切歌 play() 恢复 + waiting 超时 + ended 防御
 
 import { createContext, useContext, useReducer, useRef, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import type { Song, PlayerState } from './types';
@@ -174,8 +174,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     audio.pause();
     audio.src = '';
     audio.src = api.streamUrl(state.currentSong.id);
+
     if (state.isPlaying) {
-      audio.play().catch(() => {});
+      // V10.3: play() 在 src 刚设置时数据尚未到达，大部分情况能瞬间就绪
+      // 但偶尔（GC/CPU 繁忙/网络抖动）play() 会失败且无恢复机制 → 静默卡死
+      // 解决：play() 失败时等待 canplay 再重试
+      let cleaned = false;
+      audio.play().catch(() => {
+        if (cleaned) return;
+        const onCanPlay = () => {
+          if (!cleaned) audio.play().catch(() => {});
+        };
+        audio.addEventListener('canplay', onCanPlay, { once: true });
+      });
+      return () => { cleaned = true; };
     }
   }, [state.currentSong?.id]);
 
@@ -281,7 +293,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const handleEnded = () => {
       if (state.playMode === 'repeat-one') {
         audio.currentTime = 0;
-        audio.play().catch(() => {});
+        // V10.3: 防御性 canplay 重试，防止极罕见情况下 seek 后数据未就绪
+        audio.play().catch(() => {
+          const onReady = () => {
+            audio.play().catch(() => {});
+          };
+          audio.addEventListener('canplay', onReady, { once: true });
+        });
       } else {
         dispatch({ type: 'NEXT' });
       }
@@ -290,15 +308,145 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return () => audio.removeEventListener('ended', handleEnded);
   }, [state.playMode]);
 
-  // ⚡ V10: 歌曲文件被删除时的容错 — 自动跳下一首
+  // ⚡ V10.2: 错误跳歌防御 — 防止后端重启等场景触发无限切歌死循环
+  const errorSkipCount = useRef(0);
+  const errorCooldownRef = useRef(false);
+  const MAX_CONSECUTIVE_SKIPS = 3;
+  const ERROR_COOLDOWN_MS = 2000;  // 两次自动跳歌之间至少 2 秒
+
+  // 成功开始播放时重置错误计数（说明后端已恢复）
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const onCanPlay = () => {
+      errorSkipCount.current = 0;
+      errorCooldownRef.current = false;
+    };
+    audio.addEventListener('canplay', onCanPlay);
+    return () => audio.removeEventListener('canplay', onCanPlay);
+  }, []);
+
+  // ⚡ V10.2: 音频卡死检测（stalled 事件 + 10 秒超时）
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !state.isPlaying) return;
+
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const handleStalled = () => {
+      // 浏览器解码/缓冲卡住时触发 stalled，给 10 秒恢复时间
+      stallTimer = setTimeout(() => {
+        const a = audioRef.current;
+        // 如果 10 秒后 still paused/ended/error，说明彻底卡死了
+        if (a && a.paused && !a.ended && !a.error && state.isPlaying) {
+          console.warn('[Player] 音频卡死超过 10 秒，尝试跳下一首');
+          errorSkipCount.current++;
+          if (errorSkipCount.current <= MAX_CONSECUTIVE_SKIPS) {
+            dispatch({ type: 'NEXT' });
+          } else {
+            console.warn('[Player] 连续卡死过多，停止自动跳歌');
+          }
+        }
+      }, 10000);
+    };
+
+    const clearStall = () => {
+      if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
+    };
+
+    audio.addEventListener('stalled', handleStalled);
+    audio.addEventListener('playing', clearStall);
+    audio.addEventListener('canplay', clearStall);
+
+    return () => {
+      clearStall();
+      audio.removeEventListener('stalled', handleStalled);
+      audio.removeEventListener('playing', clearStall);
+      audio.removeEventListener('canplay', clearStall);
+    };
+  }, [state.isPlaying, state.currentSong?.id]);
+
+  // ⚡ V10.3: 等待数据超时检测 — 补充 stalled 未覆盖的场景
+  // waiting 在缓冲不足时频繁触发，stalled 只在完全卡死时触发
+  // 两者都需要超时保护，防止播放器停在无声状态
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !state.isPlaying) return;
+
+    let waitTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const handleWaiting = () => {
+      // 缓冲不足暂停播放，给 15 秒加载时间
+      waitTimer = setTimeout(() => {
+        const a = audioRef.current;
+        if (a && a.paused && !a.ended && !a.error && state.isPlaying) {
+          console.warn('[Player] 缓冲等待超时 15 秒，尝试跳下一首');
+          errorSkipCount.current++;
+          if (errorSkipCount.current <= MAX_CONSECUTIVE_SKIPS) {
+            dispatch({ type: 'NEXT' });
+          } else {
+            console.warn('[Player] 连续等待超时过多，停止自动跳歌');
+          }
+        }
+      }, 15000);
+    };
+
+    const clearWait = () => {
+      if (waitTimer) { clearTimeout(waitTimer); waitTimer = null; }
+    };
+
+    audio.addEventListener('waiting', handleWaiting);
+    audio.addEventListener('playing', clearWait);
+    audio.addEventListener('canplay', clearWait);
+    audio.addEventListener('pause', clearWait);
+
+    return () => {
+      clearWait();
+      audio.removeEventListener('waiting', handleWaiting);
+      audio.removeEventListener('playing', clearWait);
+      audio.removeEventListener('canplay', clearWait);
+      audio.removeEventListener('pause', clearWait);
+    };
+  }, [state.isPlaying, state.currentSong?.id]);
+
+  // ⚡ V10.2: 歌曲错误容错 — 带防御的自动跳下一首
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
     const handleError = () => {
       const err = audio.error;
-      // MEDIA_ERR_SRC_NOT_SUPPORTED (4) 或网络错误 → 文件可能被删
-      if (err && (err.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED || err.code === MediaError.MEDIA_ERR_NETWORK)) {
-        console.warn('[Player] 歌曲加载失败，跳过:', state.currentSong?.title);
+      if (!err) return;
+
+      const errorNames: Record<number, string> = {
+        [MediaError.MEDIA_ERR_ABORTED]: 'ABORTED',
+        [MediaError.MEDIA_ERR_NETWORK]: 'NETWORK',
+        [MediaError.MEDIA_ERR_DECODE]: 'DECODE',
+        [MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED]: 'SRC_NOT_SUPPORTED',
+      };
+      console.warn(`[Player] 播放错误 [${errorNames[err.code] || err.code}]: ${state.currentSong?.title}`);
+
+      // 冷却检查：防止短时间内反复跳歌
+      if (errorCooldownRef.current) {
+        console.warn('[Player] 冷却中，忽略本次错误');
+        return;
+      }
+
+      errorSkipCount.current++;
+      if (errorSkipCount.current > MAX_CONSECUTIVE_SKIPS) {
+        console.warn(`[Player] 连续 ${MAX_CONSECUTIVE_SKIPS}+ 次错误，停止自动跳歌。可能后端异常，请检查。`);
+        dispatch({ type: 'PAUSE' });
+        return;
+      }
+
+      // MEDIA_ERR_NETWORK (2): 网络/后端问题 → 跳下一首
+      // MEDIA_ERR_SRC_NOT_SUPPORTED (4): 文件损坏/格式不支持 → 跳下一首
+      // MEDIA_ERR_DECODE (3): 解码错误（文件损坏）→ 也跳过
+      if (err.code === MediaError.MEDIA_ERR_NETWORK
+          || err.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+          || err.code === MediaError.MEDIA_ERR_DECODE) {
+        console.warn(`[Player] 自动跳过 (第 ${errorSkipCount.current}/${MAX_CONSECUTIVE_SKIPS} 次)`);
+        errorCooldownRef.current = true;
+        setTimeout(() => { errorCooldownRef.current = false; }, ERROR_COOLDOWN_MS);
         dispatch({ type: 'NEXT' });
       }
     };
