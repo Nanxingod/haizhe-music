@@ -259,7 +259,8 @@ cd backend && python main.py
 cd frontend && npx vite --host 0.0.0.0
 
 # 桌面版（Electron，含透明悬浮窗）
-双击 start-desktop.bat
+双击桌面快捷方式「HaiZhe Music」（推荐 · 无终端窗口启动）
+# 或调试时：双击 start-desktop.bat（输出写入 desktop.log）
 ```
 
 - **PC 访问**：`http://localhost:5173`

@@ -36,6 +36,38 @@ MUSIC_DIR = _load_music_dir()
 # 封面缩略图缓存目录
 COVER_CACHE_DIR = Path(__file__).parent / "cache" / "covers"
 
+# ── 元数据缓存（V11 启动优化）──
+# 旧版每次启动都全量解析 676 个 MP3（mutagen 每文件 10-20ms → 扫描 7-14 秒），
+# 且 FastAPI startup 事件同步完成后才监听端口 → 窗口干等。
+# 现在以 (文件名, mtime, size) 为键缓存解析结果，温启动扫描 < 1 秒。
+SCAN_CACHE_VERSION = 1
+SCAN_CACHE_PATH = Path(__file__).parent / "cache" / "scan_cache.json"
+
+
+def _load_scan_cache() -> dict:
+    try:
+        with open(SCAN_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("version") == SCAN_CACHE_VERSION and data.get("music_dir") == str(MUSIC_DIR):
+            return data.get("files", {})
+    except Exception:
+        pass
+    return {}
+
+
+def _save_scan_cache(files: dict):
+    try:
+        SCAN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SCAN_CACHE_PATH.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(
+                {"version": SCAN_CACHE_VERSION, "music_dir": str(MUSIC_DIR), "files": files},
+                f, ensure_ascii=False,
+            )
+        tmp.replace(SCAN_CACHE_PATH)  # 原子替换，避免写一半崩溃留下坏缓存
+    except Exception as e:
+        print(f"[Scanner] 元数据缓存写入失败: {e}")
+
 # 多歌手分隔符
 ARTIST_SPLIT_RE = re.compile(r"[、,，/&]|\bfeat\.?\b", re.IGNORECASE)
 
@@ -111,7 +143,7 @@ def _save_thumbnail(data: bytes, dest: Path, size: int = 150):
 
 
 def scan_all() -> tuple[list[Song], list[Artist]]:
-    """扫描音乐目录，预提取封面缩略图"""
+    """扫描音乐目录，预提取封面缩略图（带元数据缓存）"""
     songs: list[Song] = []
     artist_songs: dict[str, list[Song]] = {}
 
@@ -125,10 +157,12 @@ def scan_all() -> tuple[list[Song], list[Artist]]:
     mp3_files = [f for f in MUSIC_DIR.iterdir() if f.is_file() and f.suffix.lower() == ".mp3"]
     total = len(mp3_files)
     extracted = 0
+    cache_hits = 0
+
+    cache = _load_scan_cache()
+    new_cache: dict = {}
 
     for i, filepath in enumerate(mp3_files):
-        title, raw_artist = _parse_filename(filepath)
-        individual = _split_artists(raw_artist)
         sid = _file_id(filepath)
 
         lrc_path = filepath.with_suffix(".lrc")
@@ -136,10 +170,30 @@ def scan_all() -> tuple[list[Song], list[Artist]]:
         if not has_lrc:
             lrc_path = None
 
-        # ⚡ 扫描时一并提取封面缩略图到磁盘缓存
-        has_cover = _extract_and_cache_cover(filepath, sid)
-        if has_cover:
-            extracted += 1
+        # ⚡ 缓存命中：文件未变（mtime+size 一致）则跳过 mutagen 全量解析
+        st = filepath.stat()
+        cached = cache.get(filepath.name)
+        if cached and cached.get("mtime") == st.st_mtime and cached.get("size") == st.st_size:
+            title = cached["title"]
+            raw_artist = cached["artist"]
+            individual = cached["artists"]
+            has_cover = cached["has_cover"]
+            duration = cached["duration"]
+            cache_hits += 1
+        else:
+            title, raw_artist = _parse_filename(filepath)
+            individual = _split_artists(raw_artist)
+            # ⚡ 扫描时一并提取封面缩略图到磁盘缓存
+            has_cover = _extract_and_cache_cover(filepath, sid)
+            if has_cover:
+                extracted += 1
+            duration = _get_duration(filepath)
+
+        new_cache[filepath.name] = {
+            "mtime": st.st_mtime, "size": st.st_size,
+            "title": title, "artist": raw_artist, "artists": individual,
+            "has_cover": has_cover, "duration": duration,
+        }
 
         song = Song(
             id=sid,
@@ -150,7 +204,7 @@ def scan_all() -> tuple[list[Song], list[Artist]]:
             lrc_path=str(lrc_path.absolute()) if lrc_path else None,
             has_cover=has_cover,
             has_lrc=has_lrc,
-            duration=_get_duration(filepath),
+            duration=duration,
         )
         songs.append(song)
 
@@ -163,6 +217,8 @@ def scan_all() -> tuple[list[Song], list[Artist]]:
         if (i + 1) % 100 == 0:
             print(f"  [Scanner] {i+1}/{total} ...")
 
+    _save_scan_cache(new_cache)
+
     artists = [
         Artist(
             name=name,
@@ -174,7 +230,8 @@ def scan_all() -> tuple[list[Song], list[Artist]]:
         )
     ]
 
-    print(f"[Scanner] 完成: {len(songs)} 首歌, {len(artists)} 位歌手, {extracted} 个封面缩略图")
+    print(f"[Scanner] 完成: {len(songs)} 首歌, {len(artists)} 位歌手, "
+          f"{extracted} 个新封面, 缓存命中 {cache_hits}/{total}")
     return songs, artists
 
 
