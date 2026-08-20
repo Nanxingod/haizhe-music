@@ -109,8 +109,8 @@ D:\agentspace\music-player\
 双击 start.bat → 浏览器打开 http://localhost:5173
 
 # 方式2: 桌面版（推荐）
-双击 start-desktop.bat → Electron 窗口自动打开
-桌面快捷方式 "HaiZhe Music" 已创建
+双击桌面快捷方式 "HaiZhe Music" → 无终端窗口，Electron 自动打开
+# 或调试时: 双击 start-desktop.bat（输出写入 desktop.log）
 ```
 
 ### 分发给朋友
