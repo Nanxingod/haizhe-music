@@ -237,9 +237,35 @@ cd ..
 npm install
 ```
 
+### 1.5 可选功能：人声/伴奏分离（含 GPU 加速）
+
+分离功能基于开源 [audio-separator](https://github.com/karaokenerds/python-audio-separator)（UVR 模型），依赖装在项目本地 `backend/vendor/`，不污染系统环境：
+
+```bash
+cd backend
+# 基础（CPU 推理，标准质量）
+python -m pip install audio-separator==0.18.0 onnxruntime imageio-ffmpeg --target vendor
+```
+
+**GPU 加速**（NVIDIA 显卡，推荐——高质量模型 BS-Roformer 在 GPU 上约 30-60 秒/首，CPU 需 20-40 分钟）：
+
+```bash
+# CUDA 版 torch（2.8.0 + cu126，约 2.9GB 下载）
+python -m pip install torch==2.8.0 torchvision --index-url https://download.pytorch.org/whl/cu126 --target vendor
+```
+
+**模型自动下载**：首次对歌曲执行分离时自动从 HuggingFace/UVR 官方源下载到 `backend/cache/stem_models/`（标准 MDX 模型约 64MB；高质量 BS-Roformer 约 640MB），全程无需手动操作，仓库不含任何模型文件。模型为按需加载——只听原曲永远不会加载，首次点击分离时才下载/载入。
+
+**分离结果持久化**在 `<你的音乐目录>/人声分离/<歌曲ID>/`（vocals.flac + instrumental.flac），与曲库同处、随曲库迁移，可在设置页管理删除。
+
+- 标准：`UVR-MDX-NET-Inst_HQ_3.onnx`
+- 高质量：`model_bs_roformer_ep_317_sdr_12.9755.ckpt`（UVR 榜 SDR 12.98，需 GPU）
+
 ### 2. 配置音乐目录
 
-编辑 `backend/config.json`：
+启动后在「设置 → 音乐目录」里直接填写或浏览选择（推荐，实时生效并自动重扫）。
+
+或手动编辑 `backend/config.json`：
 
 ```json
 {

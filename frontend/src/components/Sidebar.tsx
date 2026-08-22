@@ -1,4 +1,4 @@
-﻿// 音乐播放器 - 侧边栏
+// 音乐播放器 - 侧边栏
 
 import { memo, useState, useEffect, useRef } from 'react';
 import { NavLink } from 'react-router-dom';
@@ -6,7 +6,7 @@ import { api } from '../api';
 
 export const Sidebar = memo(function Sidebar() {
   return (
-    <aside className="w-[240px] h-full glass sidebar-bg flex flex-col shrink-0 max-lg:w-[64px] overflow-hidden">
+    <aside className="w-[240px] h-full sidebar-bg flex flex-col shrink-0 max-lg:w-[64px] overflow-hidden">
       {/* Logo */}
       <div className="p-5 max-lg:p-3 relative z-[1]">
         <h1 className="text-2xl font-bold text-gradient max-lg:hidden tracking-tight">

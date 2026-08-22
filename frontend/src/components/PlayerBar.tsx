@@ -1,17 +1,40 @@
-﻿// 音乐播放器 - 播放栏 + 全屏播放页 + 桌面歌词
+// 音乐播放器 - 播放栏 + 全屏播放页 + 桌面歌词
 // V8 性能优化：高频读 ref 跳过 React 渲染链路
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { usePlayer, timeRef, durRef } from '../store';
+import { usePlayer, timeRef } from '../store';
 import type { Lyrics } from '../types';
 import { api } from '../api';
 import { CoverThumbnail } from './Sidebar';
+import { FxPanel } from './FxPanel';
 
 function fmt(s: number): string {
   if (!s || !isFinite(s)) return '0:00';
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
   return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+/* ── 播放模式图标（统一 SVG 风格，替代大小不一的 emoji） ── */
+function ModeIcon({ mode, size = 18 }: { mode: string; size?: number }) {
+  const props = {
+    width: size, height: size, viewBox: '0 0 24 24',
+    fill: 'none', stroke: 'currentColor', strokeWidth: 2,
+    strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const,
+  };
+  if (mode === 'shuffle') return (
+    <svg {...props}><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.8-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/></svg>
+  );
+  if (mode === 'repeat') return (
+    <svg {...props}><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+  );
+  if (mode === 'repeat-one') return (
+    <svg {...props}><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/><path d="M11 10h1v4"/></svg>
+  );
+  // sequential：顺序列表
+  return (
+    <svg {...props}><line x1="8" x2="21" y1="6" y2="6"/><line x1="8" x2="21" y1="12" y2="12"/><line x1="8" x2="21" y1="18" y2="18"/><line x1="3" x2="3.01" y1="6" y2="6"/><line x1="3" x2="3.01" y1="12" y2="12"/><line x1="3" x2="3.01" y1="18" y2="18"/></svg>
+  );
 }
 
 /* ── 桌面歌词悬浮窗（Document PiP） ── */
@@ -85,6 +108,8 @@ export function PlayerBar() {
   const [lyrics, setLyrics] = useState<Lyrics | null>(null);
   const [lyricLoading, setLyricLoading] = useState(false);
   const [pipOn, setPipOn] = useState(false);
+  const [fxOn, setFxOn] = useState(false);
+  const fxBtnRef = useRef<HTMLButtonElement>(null); // 音效面板锚点（面板中心对此按钮居中）
 
   // 切歌重置
   useEffect(() => { setLyrics(null); }, [currentSong?.id]);
@@ -167,11 +192,14 @@ export function PlayerBar() {
     document.querySelector('audio')!.currentTime = t;
   };
 
-  const modeIcons: Record<string, string> = { sequential: '\u{1F501}', shuffle: '\u{1F500}', repeat: '\u{1F502}', 'repeat-one': '\u{1F502}' };
   const cycleMode = () => {
     const modes: typeof playMode[] = ['sequential', 'shuffle', 'repeat'];
     dispatch({ type: 'SET_MODE', mode: modes[(modes.indexOf(playMode) + 1) % modes.length] });
   };
+
+  // 底栏圆形图标按钮通用样式
+  const iconBtn = 'w-9 h-9 rounded-full flex items-center justify-center transition-colors';
+  const iconBtnIdle = 'text-white/45 hover:text-white hover:bg-white/10';
 
   if (!currentSong) {
 
@@ -191,7 +219,7 @@ export function PlayerBar() {
           key={currentSong.id}
           song={currentSong} lyrics={lyrics} loading={lyricLoading}
           cur={currentTime} dur={duration} pct={pct} playing={isPlaying}
-          vol={volume} modeIcon={modeIcons[playMode] || '\u{1F501}'}
+          vol={volume} mode={playMode}
           onClose={() => setFs(false)} onProgress={onProgress}
           onTogglePlay={() => dispatch({ type: 'TOGGLE_PLAY' })}
           onPrev={() => dispatch({ type: 'PREV' })}
@@ -204,9 +232,10 @@ export function PlayerBar() {
 
       {/* Bottom bar */}
       <div className="h-18 glass shrink-0 px-4 flex items-center gap-4 relative max-md:h-14 max-md:gap-2 max-md:px-2">
+        {fxOn && <FxPanel onClose={() => setFxOn(false)} anchorRef={fxBtnRef} />}
         <div className="absolute top-0 left-0 right-0 -translate-y-1/2 px-0 z-10">
           <input type="range" min={0} max={100} value={pct} onChange={onProgress} className="progress-bar w-full"
-            style={{ background: `linear-gradient(to right, var(--accent) ${pct}%, rgba(255,255,255,0.06) ${pct}%)` }} />
+            style={{ backgroundImage: `linear-gradient(to right, var(--accent) ${pct}%, rgba(255,255,255,0.06) ${pct}%)` }} />
         </div>
 
         <div className="flex items-center gap-3 min-w-[180px] max-w-[260px] max-md:min-w-[100px] max-md:max-w-[140px]">
@@ -218,24 +247,39 @@ export function PlayerBar() {
         </div>
 
         <div className="flex-1 flex flex-col items-center gap-0.5 max-md:gap-0">
-          <div className="flex items-center gap-4 max-md:gap-2">
-            <button onClick={cycleMode} className="text-white/35 hover:text-white text-xs w-6 text-center">{modeIcons[playMode] || '\u{1F501}'}</button>
-            <button onClick={() => dispatch({ type: 'PREV' })} className="text-white/60 hover:text-white">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+          <div className="flex items-center gap-2 max-md:gap-1">
+            <button onClick={cycleMode} title="播放模式" className={`${iconBtn} ${iconBtnIdle} max-md:w-8 max-md:h-8`}>
+              <ModeIcon mode={playMode} size={18} />
             </button>
-            <button onClick={() => dispatch({ type: 'TOGGLE_PLAY' })} className="w-9 h-9 rounded-full bg-white flex items-center justify-center hover:scale-105 transition-transform shadow-lg">
+            <button onClick={() => dispatch({ type: 'PREV' })} title="上一首" className={`${iconBtn} ${iconBtnIdle} max-md:w-8 max-md:h-8`}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+            </button>
+            <button onClick={() => dispatch({ type: 'TOGGLE_PLAY' })} title="播放/暂停"
+              className="w-11 h-11 rounded-full bg-white flex items-center justify-center hover:scale-105 transition-transform shadow-lg max-md:w-9 max-md:h-9">
               {isPlaying
-                ? <svg width="16" height="16" viewBox="0 0 24 24" fill="black"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                : <svg width="16" height="16" viewBox="0 0 24 24" fill="black" style={{ marginLeft: 1 }}><path d="M8 5v14l11-7z"/></svg>
+                ? <svg width="18" height="18" viewBox="0 0 24 24" fill="black"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                : <svg width="18" height="18" viewBox="0 0 24 24" fill="black" style={{ marginLeft: 1 }}><path d="M8 5v14l11-7z"/></svg>
               }
             </button>
-            <button onClick={() => dispatch({ type: 'NEXT' })} className="text-white/60 hover:text-white">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+            <button onClick={() => dispatch({ type: 'NEXT' })} title="下一首" className={`${iconBtn} ${iconBtnIdle} max-md:w-8 max-md:h-8`}>
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
             </button>
-            <button onClick={() => setFs(true)} className="text-xs px-2 py-1 rounded-full text-white/35 hover:text-white hover:bg-white/5 transition-colors">词</button>
-            <button onClick={togglePip}
-              className={`text-xs px-2 py-1 rounded-full transition-colors ${pipOn ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : 'text-white/35 hover:text-white hover:bg-white/5'}`}>
+            <button onClick={() => setFs(true)} title="全屏歌词页"
+              className={`${iconBtn} text-sm ${fs ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : iconBtnIdle} max-md:w-8 max-md:h-8`}>
+              词
+            </button>
+            <button onClick={togglePip} title="桌面歌词"
+              className={`${iconBtn} text-[13px] ${pipOn ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : iconBtnIdle} max-md:w-8 max-md:h-8 max-md:text-xs`}>
               桌词
+            </button>
+            <button ref={fxBtnRef} onClick={() => setFxOn(v => !v)} title="音效（倍速/升降KEY/音轨）"
+              className={`${iconBtn} text-[13px] relative ${
+                fxOn || state.playbackRate !== 1 || state.pitchSemitones !== 0 || state.chipmunk || state.stem !== 'original'
+                  ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : iconBtnIdle} max-md:w-8 max-md:h-8 max-md:text-xs`}>
+              效果
+              {state.stem !== 'original' && (
+                <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-[var(--accent)]" />
+              )}
             </button>
           </div>
           <div className="flex items-center gap-2 text-xs text-white/20 max-md:hidden">
@@ -244,8 +288,9 @@ export function PlayerBar() {
         </div>
 
         <div className="flex items-center gap-2 min-w-[120px] justify-end max-md:min-w-[48px]">
-          <button onClick={() => dispatch({ type: 'TOGGLE_MUTE' })} className="text-white/35 hover:text-white">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <button onClick={() => dispatch({ type: 'TOGGLE_MUTE' })} title="静音"
+            className={`${iconBtn} ${iconBtnIdle} max-md:w-8 max-md:h-8`}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               {isMuted || volume === 0
                 ? <><path d="M11 5 6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></>
                 : <><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></>
@@ -254,8 +299,8 @@ export function PlayerBar() {
           </button>
           <input type="range" min={0} max={100} value={volume * 100}
             onChange={e => dispatch({ type: 'SET_VOLUME', volume: Number(e.target.value) / 100 })}
-            className="w-20 progress-bar max-md:hidden"
-            style={{ background: `linear-gradient(to right, var(--text-secondary) ${volume * 100}%, rgba(255,255,255,0.06) ${volume * 100}%)` }} />
+            className="w-24 progress-bar max-md:hidden"
+            style={{ backgroundImage: `linear-gradient(to right, var(--text-secondary) ${volume * 100}%, rgba(255,255,255,0.06) ${volume * 100}%)` }} />
         </div>
       </div>
     </>
@@ -263,12 +308,12 @@ export function PlayerBar() {
 }
 
 /* ═══════════════ 全屏播放（自动滚动歌词居中） ═══════════════ */
-function FSPlayer({ song, lyrics, loading, cur, dur, pct, playing, vol, modeIcon,
+function FSPlayer({ song, lyrics, loading, cur, dur, pct, playing, vol, mode,
   onClose, onProgress, onTogglePlay, onPrev, onNext, onVolume, onToggleMute, onCycleMode,
 }: {
   song: import('../types').Song; lyrics: Lyrics | null; loading: boolean;
   cur: number; dur: number; pct: number; playing: boolean;
-  vol: number; modeIcon: string;
+  vol: number; mode: string;
   onClose: () => void; onProgress: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onTogglePlay: () => void; onPrev: () => void; onNext: () => void;
   onVolume: (e: React.ChangeEvent<HTMLInputElement>) => void; onToggleMute: () => void;
@@ -358,24 +403,32 @@ function FSPlayer({ song, lyrics, loading, cur, dur, pct, playing, vol, modeIcon
         <div className="w-full max-w-xl flex items-center gap-3">
           <span className="text-xs text-white/20 w-10 text-right">{fmt(cur)}</span>
           <input type="range" min={0} max={100} value={pct} onChange={onProgress} className="progress-bar flex-1"
-            style={{ background: `linear-gradient(to right, var(--accent) ${pct}%, rgba(255,255,255,0.08) ${pct}%)` }} />
+            style={{ backgroundImage: `linear-gradient(to right, var(--accent) ${pct}%, rgba(255,255,255,0.08) ${pct}%)` }} />
           <span className="text-xs text-white/20 w-10">{fmt(dur)}</span>
         </div>
-        <div className="flex items-center gap-6">
-          <button onClick={onCycleMode} className="text-white/25 hover:text-white text-xs w-6 text-center">{modeIcon}</button>
-          <button onClick={onPrev} className="text-white/40 hover:text-white"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg></button>
-          <button onClick={onTogglePlay} className="w-10 h-10 rounded-full bg-white flex items-center justify-center hover:scale-105 transition-transform shadow-lg">
+        <div className="flex items-center gap-5">
+          <button onClick={onCycleMode} title="播放模式" className="w-10 h-10 rounded-full flex items-center justify-center text-white/35 hover:text-white hover:bg-white/10 transition-colors">
+            <ModeIcon mode={mode} size={20} />
+          </button>
+          <button onClick={onPrev} title="上一首" className="w-10 h-10 rounded-full flex items-center justify-center text-white/55 hover:text-white hover:bg-white/10 transition-colors">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
+          </button>
+          <button onClick={onTogglePlay} title="播放/暂停" className="w-14 h-14 rounded-full bg-white flex items-center justify-center hover:scale-105 transition-transform shadow-lg">
             {playing
-              ? <svg width="18" height="18" viewBox="0 0 24 24" fill="black"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-              : <svg width="18" height="18" viewBox="0 0 24 24" fill="black" style={{ marginLeft: 1 }}><path d="M8 5v14l11-7z"/></svg>
+              ? <svg width="22" height="22" viewBox="0 0 24 24" fill="black"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+              : <svg width="22" height="22" viewBox="0 0 24 24" fill="black" style={{ marginLeft: 2 }}><path d="M8 5v14l11-7z"/></svg>
             }
           </button>
-          <button onClick={onNext} className="text-white/40 hover:text-white"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
+          <button onClick={onNext} title="下一首" className="w-10 h-10 rounded-full flex items-center justify-center text-white/55 hover:text-white hover:bg-white/10 transition-colors">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+          </button>
         </div>
         <div className="flex items-center gap-2 max-md:hidden">
-          <button onClick={onToggleMute} className="text-white/25 hover:text-white"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg></button>
+          <button onClick={onToggleMute} className="w-9 h-9 rounded-full flex items-center justify-center text-white/30 hover:text-white hover:bg-white/10 transition-colors">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 5 6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>
+          </button>
           <input type="range" min={0} max={100} value={vol * 100} onChange={onVolume} className="w-20 progress-bar"
-            style={{ background: `linear-gradient(to right, var(--text-secondary) ${vol * 100}%, rgba(255,255,255,0.06) ${vol * 100}%)` }} />
+            style={{ backgroundImage: `linear-gradient(to right, var(--text-secondary) ${vol * 100}%, rgba(255,255,255,0.06) ${vol * 100}%)` }} />
         </div>
       </div>
     </div>

@@ -13,7 +13,7 @@ export function FloatingLyrics() {
   // 换歌时重新加载歌词
   useEffect(() => {
     setLyrics(null);
-    if (!currentSong?.lrc_path) return;
+    if (!currentSong?.has_lrc) return;
     api.getLyrics(currentSong.id).then(setLyrics).catch(() => {});
   }, [currentSong?.id]);
 

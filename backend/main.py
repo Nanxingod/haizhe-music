@@ -3,15 +3,18 @@
 import os
 import re
 import gc
+import threading
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
-from scanner import scan_all, search_songs, get_songs_by_artist, MUSIC_DIR, COVER_CACHE_DIR
+import scanner
+from scanner import scan_all, search_songs, get_songs_by_artist, COVER_CACHE_DIR
 from lyrics import parse_lrc
 from models import Song, Artist
+import separator as stems_mod
 
 app = FastAPI(title="小海蜇音乐播放器", version="2.2.0")
 
@@ -84,18 +87,26 @@ STREAM_BUF = 128 * 1024
 
 
 @app.get("/api/stream/{song_id}")
-async def stream_audio(song_id: str, request: Request):
+async def stream_audio(song_id: str, request: Request, stem: str = Query(default="")):
     song = next((s for s in ALL_SONGS if s.id == song_id), None)
     if not song:
         raise HTTPException(404, "歌曲不存在")
 
-    filepath = song.file_path
+    # V12: 支持播放分离出的人声/伴奏音轨（FLAC 缓存）
+    if stem in ("vocals", "instrumental"):
+        f = stems_mod.stems_path(song_id, stem)
+        if not f.exists():
+            raise HTTPException(404, f"该歌曲没有分离的{stem}音轨，请先执行分离")
+        filepath, mime = str(f), "audio/flac"
+    else:
+        filepath, mime = song.file_path, "audio/mpeg"
+
     file_size = os.path.getsize(filepath)
     range_header = request.headers.get("range")
 
     if not range_header:
         return FileResponse(
-            filepath, media_type="audio/mpeg",
+            filepath, media_type=mime,
             headers={"Accept-Ranges": "bytes", "Cache-Control": "public, max-age=3600"},
         )
 
@@ -129,7 +140,7 @@ async def stream_audio(song_id: str, request: Request):
             print(f"[Stream] 流媒体传输中断: {e}")
 
     return StreamingResponse(
-        file_iterator(), status_code=206, media_type="audio/mpeg",
+        file_iterator(), status_code=206, media_type=mime,
         headers={
             "Content-Range": f"bytes {start}-{end}/{file_size}",
             "Accept-Ranges": "bytes",
@@ -198,22 +209,165 @@ async def get_lyrics(song_id: str):
         raise HTTPException(500, f"歌词解析失败: {e}")
 
 
+# --- 背景图：默认图（frontend/public）+ 自定义上传（backend/cache/bg）---
+
+_BG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+_BG_AREAS = ("main", "sidebar", "player")
+
+
+def _bg_custom_dir(area: str) -> Path:
+    return Path(__file__).parent / "cache" / "bg" / area
+
+
+def _bg_public_dir(area: str) -> Path:
+    return Path(__file__).parent.parent / "frontend" / "public" / "bg" / area
+
+
 @app.get("/api/bg-images/{area}")
 async def list_bg_images(area: str):
-    if area not in ("main", "sidebar", "player"):
+    """合并列出默认图（/bg/... 静态路径）与自定义上传图（/api/bg-image/... 路径）。"""
+    if area not in _BG_AREAS:
         raise HTTPException(400, "area 必须是 main / sidebar / player")
-    bg_dir = Path(__file__).parent.parent / "frontend" / "public" / "bg" / area
-    if not bg_dir.exists():
-        return []
-    exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
-    return [{"name": f.name, "path": f"/bg/{area}/{f.name}"}
-            for f in sorted(bg_dir.iterdir()) if f.is_file() and f.suffix.lower() in exts]
+    items = []
+    pub = _bg_public_dir(area)
+    if pub.exists():
+        items += [{"name": f.stem, "file": f.name, "path": f"/bg/{area}/{f.name}", "custom": False}
+                  for f in sorted(pub.iterdir()) if f.is_file() and f.suffix.lower() in _BG_EXTS]
+    cus = _bg_custom_dir(area)
+    if cus.exists():
+        items += [{"name": f.stem, "file": f.name, "path": f"/api/bg-image/{area}/{f.name}", "custom": True}
+                  for f in sorted(cus.iterdir()) if f.is_file() and f.suffix.lower() in _BG_EXTS]
+    return items
+
+
+@app.post("/api/bg-images/{area}")
+async def upload_bg_image(area: str, request: Request, name: str = Query(default="")):
+    """上传自定义背景图。body 为图片二进制，?name= 文件名（含扩展名）。"""
+    if area not in _BG_AREAS:
+        raise HTTPException(400, "area 必须是 main / sidebar / player")
+    # 清理文件名：只留安全字符，防路径穿越
+    safe = "".join(c for c in name if c.isalnum() or c in "-_.（）()[]【】 ")
+    stem = Path(safe).stem or "custom"
+    suffix = Path(safe).suffix.lower()
+    if suffix not in _BG_EXTS:
+        suffix = ".png"
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, "上传内容为空")
+    if len(data) > 20 * 1024 * 1024:
+        raise HTTPException(413, "图片超过 20MB 上限")
+    d = _bg_custom_dir(area)
+    d.mkdir(parents=True, exist_ok=True)
+    # 重名时追加序号
+    target = d / f"{stem}{suffix}"
+    i = 1
+    while target.exists():
+        target = d / f"{stem}-{i}{suffix}"
+        i += 1
+    target.write_bytes(data)
+    return {"name": target.stem, "path": f"/api/bg-image/{area}/{target.name}", "custom": True}
+
+
+@app.get("/api/bg-image/{area}/{filename}")
+async def get_bg_image(area: str, filename: str):
+    if area not in _BG_AREAS:
+        raise HTTPException(400, "area 非法")
+    f = _bg_custom_dir(area) / Path(filename).name
+    if not f.is_file():
+        raise HTTPException(404, "图片不存在")
+    mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}.get(f.suffix.lower(), "image/png")
+    return FileResponse(str(f), media_type=mime, headers={"Cache-Control": "public, max-age=3600"})
+
+
+@app.delete("/api/bg-images/{area}/{filename}")
+async def delete_bg_image(area: str, filename: str):
+    if area not in _BG_AREAS:
+        raise HTTPException(400, "area 非法")
+    f = _bg_custom_dir(area) / Path(filename).name
+    if not f.is_file():
+        raise HTTPException(404, "图片不存在")
+    f.unlink()
+    return {"ok": True}
 
 
 @app.get("/api/status")
 async def get_status():
     thumb_count = len(list(COVER_CACHE_DIR.glob("*.jpg"))) if COVER_CACHE_DIR.exists() else 0
-    return {"songs": len(ALL_SONGS), "artists": len(ARTISTS), "music_dir": str(MUSIC_DIR), "cached_covers": thumb_count}
+    return {"songs": len(ALL_SONGS), "artists": len(ARTISTS), "music_dir": str(scanner.MUSIC_DIR), "cached_covers": thumb_count}
+
+
+# --- 音乐目录设置（设置页运行时切换曲库）---
+
+@app.get("/api/config")
+async def get_config():
+    return {"music_dir": str(scanner.MUSIC_DIR)}
+
+
+@app.post("/api/config")
+def set_config(body: dict):
+    """切换音乐目录：校验 → 写 config.json → 清缓存 → 全量重扫。
+    同步 def（FastAPI 自动放线程池），冷扫描 7-14s 期间不阻塞事件循环（流媒体照常）。"""
+    global ALL_SONGS, ARTISTS
+    new_dir = str(body.get("music_dir") or "").strip()
+    if not new_dir:
+        raise HTTPException(400, "music_dir 不能为空")
+    ok, msg = scanner.set_music_dir(new_dir)
+    if not ok:
+        raise HTTPException(400, msg)
+    ALL_SONGS, ARTISTS = scan_all()
+    print(f"[Config] 音乐目录已切换: {msg}，共 {len(ALL_SONGS)} 首")
+    return {"music_dir": msg, "songs": len(ALL_SONGS), "artists": len(ARTISTS)}
+
+
+# --- 人声/伴奏分离（V12，依赖可选：pip install audio-separator）---
+
+@app.get("/api/stems")
+async def stems_list():
+    return {
+        "available": stems_mod.is_available(),
+        "gpu": stems_mod.has_gpu(),
+        "items": stems_mod.list_ready(),
+    }
+
+
+@app.get("/api/stems/{song_id}")
+async def stems_status(song_id: str):
+    task = stems_mod.get_task(song_id)
+    ready = stems_mod.stems_path(song_id, "vocals").exists()
+    # 进行中的任务优先于旧缓存（如用 HQ 重分离时，旧 standard 缓存仍存在但不能掩盖进度）
+    processing = task.get("status") == "processing"
+    return {
+        "available": stems_mod.is_available(),
+        "gpu": stems_mod.has_gpu(),
+        "status": "processing" if processing else ("ready" if ready else task.get("status", "none")),
+        "progress": task.get("progress", 0) if processing else (100 if ready else task.get("progress", 0)),
+        "quality": task.get("quality") if processing else (stems_mod.cached_quality(song_id) if ready else None),
+        "error": task.get("error"),
+    }
+
+
+@app.post("/api/stems/{song_id}/separate")
+async def stems_start(song_id: str, quality: str = Query(default="standard")):
+    song = next((s for s in ALL_SONGS if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "歌曲不存在")
+    if not stems_mod.is_available():
+        raise HTTPException(503, "后端未安装 audio-separator（pip install audio-separator）")
+    if quality not in stems_mod.MODELS:
+        quality = "standard"
+    if stems_mod.stems_path(song_id, "vocals").exists() and stems_mod.cached_quality(song_id) == quality:
+        return {"status": "ready"}
+    err = stems_mod.start_separation(song_id, song.file_path, quality)
+    if err:
+        raise HTTPException(409, err)
+    return {"status": "processing", "quality": quality}
+
+
+@app.delete("/api/stems/{song_id}")
+async def stems_delete(song_id: str):
+    stems_mod.delete_stems(song_id)
+    return {"ok": True}
 
 
 @app.post("/api/refresh")
@@ -237,6 +391,8 @@ async def setup_gc_timer():
             if collected > 0:
                 print(f"[GC] 回收 {collected} 个对象")
     asyncio.create_task(periodic_gc())
+    # GPU 预检测放后台线程：torch 导入耗时 1-2s，避免首次打开效果面板时阻塞请求
+    threading.Thread(target=stems_mod.has_gpu, daemon=True).start()
 
 
 if __name__ == "__main__":

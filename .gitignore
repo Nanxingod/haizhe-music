@@ -8,6 +8,7 @@ __pycache__/
 *.pyo
 backend/cache/
 backend/build/
+backend/vendor/
 backend/*.log
 
 # ── 构建输出 ──
@@ -31,7 +32,22 @@ frontend/public/bg.png
 Thumbs.db
 desktop.ini
 
-# ── 环境 / 密钥 ──
+# ── 背景图：仅上传默认三张，用户添加的自定义图片不上传 ──
+frontend/public/bg/**
+!frontend/public/bg/main/
+frontend/public/bg/main/**
+!frontend/public/bg/main/bg-main.png
+!frontend/public/bg/sidebar/
+frontend/public/bg/sidebar/**
+!frontend/public/bg/sidebar/bg-sidebar.png
+!frontend/public/bg/player/
+frontend/public/bg/player/**
+!frontend/public/bg/player/bg-player.png
+
+# ── 本地配置（含个人路径，不入库，参考 config.example.json）──
+backend/config.json
+
+# ── 环境变量 / 密钥 ──
 .env
 .env.local
 *.secret
@@ -42,25 +58,36 @@ desktop.ini
 *.swp
 *.swo
 
-# ── Agent 工具 / 本地调试产物 ──
-.workbuddy/
+# ── 本地调试产物 ──
 desktop.log
 .launch-test.txt
 
-# ── 各类 AI/Agent 辅助工具的本地配置与记录 ──
+# ── 本地开发辅助工具的配置与记录 ──
+.workbuddy/
+.codebuddy/
+.claude/
+CLAUDE.md
+.claude.json
 .codex/
 codex.md
 .opencode/
 opencode.json
 OPENCODE.md
-.claude/
-CLAUDE.md
-.claude.json
+.pi/
+PI.md
+.trae/
+.trae-rules/
 .cursor/
 .cursorrules
 .cursorignore
-.trae/
-.trae-rules/
+.zcode/
+ZCODE.md
+.deepseek/
+.dsh/
+DEEPSEEK.md
+.kimi/
+.kimi-code/
+KIMI.md
 .windsurf/
 .windsurfrules
 .aider*

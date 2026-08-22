@@ -265,6 +265,16 @@ ipcMain.on('lyric-config', (_e, cfg) => {
   if (lyricWin && !lyricWin.isDestroyed() && lyricReady) lyricWin.webContents.send('lyric-config', cfg);
 });
 
+// 音乐目录选择（设置页）
+ipcMain.handle('pick-music-dir', async () => {
+  const { dialog } = require('electron');
+  const r = await dialog.showOpenDialog(mainWin, {
+    title: '选择音乐文件夹',
+    properties: ['openDirectory'],
+  });
+  return r.canceled ? null : r.filePaths[0];
+});
+
 // ── 生命周期 ──
 app.whenReady().then(async () => {
   // ⚡ V11.1: 先拿单实例锁（可能要等旧实例退出释放，最多 10 秒）

@@ -16,7 +16,8 @@ from models import Song, Artist
 # 从 config.json 读取音乐目录
 def _load_music_dir() -> Path:
     config_path = Path(__file__).parent / "config.json"
-    default = Path(r"D:\Music\lxmusic")
+    # config.json 不存在时的默认值（用户「音乐」文件夹，跨平台）
+    default = Path.home() / "Music"
     try:
         if config_path.exists():
             with open(config_path, "r", encoding="utf-8") as f:
@@ -35,6 +36,35 @@ MUSIC_DIR = _load_music_dir()
 
 # 封面缩略图缓存目录
 COVER_CACHE_DIR = Path(__file__).parent / "cache" / "covers"
+
+
+def set_music_dir(new_dir: str) -> tuple[bool, str]:
+    """运行时切换音乐目录（设置页调用）。写回 config.json + 更新模块变量 + 清扫描缓存。
+    返回 (成功?, 消息)。注意：from scanner import MUSIC_DIR 拿到的是旧绑定，
+    切换后请通过 scanner.MUSIC_DIR 动态访问。"""
+    global MUSIC_DIR
+    p = Path(new_dir)
+    if not p.is_dir():
+        return False, f"目录不存在或不可访问: {new_dir}"
+    config_path = Path(__file__).parent / "config.json"
+    try:
+        cfg = {}
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        cfg["music_dir"] = str(p)
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return False, f"写入配置失败: {e}"
+    MUSIC_DIR = p
+    # 目录变了，元数据缓存全部失效
+    try:
+        if SCAN_CACHE_PATH.exists():
+            SCAN_CACHE_PATH.unlink()
+    except Exception:
+        pass
+    return True, str(p)
 
 # ── 元数据缓存（V11 启动优化）──
 # 旧版每次启动都全量解析 676 个 MP3（mutagen 每文件 10-20ms → 扫描 7-14 秒），

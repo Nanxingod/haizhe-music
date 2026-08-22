@@ -57,8 +57,8 @@ export const SearchPage = memo(function SearchPage() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      {/* Search header */}
-      <div className="sticky top-0 z-10 glass border-b border-white/5 px-8 py-6 max-md:px-4">
+      {/* Search header：sticky 保留（滚动时搜索框可用），去 glass 蒙版，输入框自带背景+模糊保证可读 */}
+      <div className="sticky top-0 z-10 px-8 py-6 max-md:px-4">
         <form onSubmit={handleSubmit}>
           <div className="relative max-w-xl">
             <svg
@@ -76,7 +76,7 @@ export const SearchPage = memo(function SearchPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="搜索歌曲或歌手..."
-              className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-12 pr-4 text-white placeholder-white/20 outline-none focus:border-[var(--accent)] focus:bg-white/8 transition-all text-sm"
+              className="w-full bg-black/30 backdrop-blur-md border border-white/10 rounded-xl py-3 pl-12 pr-4 text-white placeholder-white/20 outline-none focus:border-[var(--accent)] focus:bg-black/45 transition-all text-sm"
               autoFocus
             />
           </div>
