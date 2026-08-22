@@ -16,4 +16,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   lyricHide: () => ipcRenderer.send('lyric-hide'),
   lyricUpdate: (data) => ipcRenderer.send('lyric-update', data),
   lyricConfig: (cfg) => ipcRenderer.send('lyric-config', cfg),
+  // 音乐目录选择
+  pickMusicDir: () => ipcRenderer.invoke('pick-music-dir'),
 });

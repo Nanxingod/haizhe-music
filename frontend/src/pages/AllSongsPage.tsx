@@ -45,7 +45,7 @@ const SongListContent = memo(function SongListContent({
     <div className="px-8 py-4 max-md:px-2">
       {letters.map(letter => (
         <div key={letter} className="mb-6">
-          <h2 className="text-xl font-bold text-white/12 mb-2 ml-2 sticky top-[72px] z-[5] py-1">{letter}</h2>
+          <h2 className="text-xl font-bold text-white/12 mb-2 ml-2 sticky top-0 z-[5] py-1">{letter}</h2>
           <div className="space-y-0.5">
             {grouped[letter].map((song, i) => (
               <SongRow
@@ -145,7 +145,7 @@ export const AllSongsPage = memo(function AllSongsPage() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="sticky top-0 z-10 glass border-b border-white/5 px-8 py-5 max-md:px-4">
+      <div className="px-8 pt-5 pb-2 max-md:px-4">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold max-md:text-xl">全部歌曲</h1>

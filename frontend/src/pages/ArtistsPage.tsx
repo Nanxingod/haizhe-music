@@ -54,7 +54,7 @@ export const ArtistsPage = memo(function ArtistsPage() {
   return (
     <div className="flex-1 overflow-y-auto">
       {/* Header */}
-      <div className="sticky top-0 z-10 glass border-b border-white/5 px-8 py-6 max-md:px-4">
+      <div className="px-8 pt-6 pb-2 max-md:px-4">
         <h1 className="text-3xl font-bold max-md:text-2xl">歌手</h1>
         <p className="text-white/40 text-sm mt-1">{artists.length} 位歌手</p>
       </div>

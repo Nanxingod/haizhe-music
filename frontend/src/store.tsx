@@ -1,9 +1,11 @@
-﻿// 音乐播放器 - 全局播放器状态管理
+// 音乐播放器 - 全局播放器状态管理
 // V10.3：V10.2 + 切歌 play() 恢复 + waiting 超时 + ended 防御
+// V12：音效引擎（倍速/移调/小黄人）+ 人声分离音轨切换
 
 import { createContext, useContext, useReducer, useRef, useCallback, useEffect, useMemo, type ReactNode } from 'react';
-import type { Song, PlayerState } from './types';
+import type { Song, PlayerState, Stem } from './types';
 import { api } from './api';
+import { FxEngine } from './fx';
 
 type Action =
   | { type: 'SET_SONG'; song: Song }
@@ -17,7 +19,11 @@ type Action =
   | { type: 'SET_PLAYLIST'; playlist: Song[]; startIndex?: number }
   | { type: 'NEXT' }
   | { type: 'PREV' }
-  | { type: 'SET_MODE'; mode: PlayerState['playMode'] };
+  | { type: 'SET_MODE'; mode: PlayerState['playMode'] }
+  | { type: 'SET_RATE'; rate: number }
+  | { type: 'SET_PITCH'; semitones: number }
+  | { type: 'TOGGLE_CHIPMUNK' }
+  | { type: 'SET_STEM'; stem: Stem };
 
 // ⚡ 高频值全局 ref — 供 PlayerBar 的 PiP tick / 歌词滚动读取，跳过 React 渲染链路
 export const timeRef = { current: 0 };
@@ -38,7 +44,24 @@ function loadPersistedState() {
   return { playMode, lastSongId };
 }
 
+// ⚡ V12: 音效持久化（倍速/移调/小黄人；stem 不持久化，重启回原唱）
+function loadFxState() {
+  try {
+    const saved = localStorage.getItem('haizhe-fx');
+    if (saved) {
+      const p = JSON.parse(saved);
+      return {
+        playbackRate: typeof p.rate === 'number' && p.rate >= 0.5 && p.rate <= 2 ? p.rate : 1,
+        pitchSemitones: typeof p.semitones === 'number' && Math.abs(p.semitones) <= 12 ? p.semitones : 0,
+        chipmunk: !!p.chipmunk,
+      };
+    }
+  } catch {}
+  return { playbackRate: 1, pitchSemitones: 0, chipmunk: false };
+}
+
 const persisted = loadPersistedState();
+const persistedFx = loadFxState();
 
 const initialState: PlayerState = {
   currentSong: null,
@@ -50,12 +73,20 @@ const initialState: PlayerState = {
   isMuted: false,
   playMode: persisted.playMode,
   lastSongId: persisted.lastSongId,
+  playbackRate: persistedFx.playbackRate,
+  pitchSemitones: persistedFx.pitchSemitones,
+  chipmunk: persistedFx.chipmunk,
+  stem: 'original',
+  playToken: 0,
 };
 
 function reducer(state: PlayerState, action: Action): PlayerState {
   switch (action.type) {
     case 'SET_SONG':
-      return { ...state, currentSong: action.song, isPlaying: false, currentTime: 0, duration: action.song.duration || 0 };
+      // 切歌重置音效：音轨/移调/小黄人是"针对这首歌"的临时设置，
+      // 换歌后新歌通常没有分离缓存（伴奏会 404 连环跳歌），恢复原曲最稳妥
+      return { ...state, currentSong: action.song, isPlaying: false, currentTime: 0, duration: action.song.duration || 0,
+        stem: 'original', pitchSemitones: 0, chipmunk: false, playToken: state.playToken + 1 };
     case 'PLAY':
       return { ...state, isPlaying: true };
     case 'PAUSE':
@@ -77,9 +108,19 @@ function reducer(state: PlayerState, action: Action): PlayerState {
         currentSong: action.playlist[action.startIndex ?? 0] || state.currentSong,
         isPlaying: false,
         currentTime: 0,
+        stem: 'original', pitchSemitones: 0, chipmunk: false,
+        playToken: state.playToken + 1,
       };
     case 'SET_MODE':
       return { ...state, playMode: action.mode };
+    case 'SET_RATE':
+      return { ...state, playbackRate: Math.min(2, Math.max(0.5, action.rate)) };
+    case 'SET_PITCH':
+      return { ...state, pitchSemitones: Math.min(12, Math.max(-12, action.semitones)) };
+    case 'TOGGLE_CHIPMUNK':
+      return { ...state, chipmunk: !state.chipmunk };
+    case 'SET_STEM':
+      return { ...state, stem: action.stem };
     case 'NEXT': {
       if (!state.currentSong || state.playlist.length === 0) return state;
       const idx = state.playlist.findIndex((s: Song) => s.id === state.currentSong!.id);
@@ -90,6 +131,9 @@ function reducer(state: PlayerState, action: Action): PlayerState {
         ...state,
         currentSong: state.playlist[nextIdx] || state.currentSong,
         currentTime: 0,
+        // 自然播完/手动切下一首：恢复原曲设置（伴奏等音轨在新歌上无缓存会 404）
+        stem: 'original', pitchSemitones: 0, chipmunk: false,
+        playToken: state.playToken + 1,
       };
     }
     case 'PREV': {
@@ -100,6 +144,8 @@ function reducer(state: PlayerState, action: Action): PlayerState {
         ...state,
         currentSong: state.playlist[prevIdx] || state.currentSong,
         currentTime: 0,
+        stem: 'original', pitchSemitones: 0, chipmunk: false,
+        playToken: state.playToken + 1,
       };
     }
     default:
@@ -120,6 +166,56 @@ const PlayerContext = createContext<PlayerContextType | null>(null);
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const fxEngineRef = useRef<FxEngine | null>(null);
+  if (!fxEngineRef.current) fxEngineRef.current = new FxEngine();
+
+  // ⚡ V12.2: 用户手势做绑定 + 唤醒 + 激活待建的移调管线。
+  // 管线（MediaElementSource+SignalsmithStretch）只在真正移调(≠0)时建立——
+  // 建立是不可逆的音频改道，顺手建立会让原曲也流经处理器产生失真。
+  // 非手势上下文（如重启后恢复持久化移调）不建图防静音，等首次手势补建。
+  useEffect(() => {
+    const onGesture = () => {
+      const fx = fxEngineRef.current!;
+      fx.bind(audioRef.current);
+      fx.resume();
+      fx.gestureApply();
+    };
+    window.addEventListener('pointerdown', onGesture, { capture: true });
+    window.addEventListener('keydown', onGesture, { capture: true });
+    return () => {
+      window.removeEventListener('pointerdown', onGesture, { capture: true });
+      window.removeEventListener('keydown', onGesture, { capture: true });
+    };
+  }, []);
+
+  // ⚡ V12: 音效参数变化 → 应用到引擎 + 持久化
+  // bind 无需手势，倍速/小黄人在任何交互路径下都立即生效（不依赖 WebAudio 管线）
+  useEffect(() => {
+    const fx = fxEngineRef.current!;
+    fx.bind(audioRef.current);
+    fx.apply({
+      rate: state.playbackRate,
+      semitones: state.pitchSemitones,
+      chipmunk: state.chipmunk,
+    });
+    try {
+      localStorage.setItem('haizhe-fx', JSON.stringify({
+        rate: state.playbackRate, semitones: state.pitchSemitones, chipmunk: state.chipmunk,
+      }));
+    } catch {}
+  }, [state.playbackRate, state.pitchSemitones, state.chipmunk]);
+
+  // ⚡ V12: 开发期自检钩子（自动化测试用，生产构建不注入）
+  useEffect(() => {
+    if (import.meta.env.DEV) {
+      (window as any).__fxEngine = fxEngineRef.current;
+    }
+  }, []);
+
+  // ⚡ V12: 最新音效参数 ref — 切音轨/换歌 effect 的依赖里没有音效参数，
+  // 但 src 重载会重置 playbackRate，需要拿到最新值在切源后补应用
+  const fxParamsRef = useRef({ rate: state.playbackRate, semitones: state.pitchSemitones, chipmunk: state.chipmunk });
+  fxParamsRef.current = { rate: state.playbackRate, semitones: state.pitchSemitones, chipmunk: state.chipmunk };
 
   // ⚡ 节流：timeupdate 原生 ~4x/s，仅每 500ms 触发一次 React dispatch
   const lastTimeDispatch = useRef(0);
@@ -165,31 +261,49 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     warmup();
   }, []);
 
-  // Update audio element when song changes
+  // Update audio element when song or stem (原唱/人声/伴奏) changes
+  // V12: 同一首歌内切换音轨时保留播放进度；换歌则从头开始
+  const prevSongIdRef = useRef<string | null>(null);
+  const metaHandlerRef = useRef<(() => void) | null>(null);
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !state.currentSong) return;
 
+    const songId = state.currentSong.id;
+    const songChanged = prevSongIdRef.current !== songId;
+    prevSongIdRef.current = songId;
+    // 同歌切音轨保留进度；但自然播完（ended）绕回同首歌时从头播，否则永远卡在结尾
+    const keepTime = !songChanged && !audio.ended && audio.currentTime > 0.3;
+    const resumeAt = keepTime ? audio.currentTime : 0;
+    const wasPlaying = state.isPlaying;
+
     // V10.1: 标准 src 切换（设 '' 自动 abort + 释放旧解码缓冲）
     audio.pause();
     audio.src = '';
-    audio.src = api.streamUrl(state.currentSong.id);
+    audio.src = api.streamUrl(songId, state.stem);
+    fxEngineRef.current!.clear(); // 清 SoundTouch 缓冲，防旧音频残留
 
-    if (state.isPlaying) {
-      // V10.3: play() 在 src 刚设置时数据尚未到达，大部分情况能瞬间就绪
-      // 但偶尔（GC/CPU 繁忙/网络抖动）play() 会失败且无恢复机制 → 静默卡死
-      // 解决：play() 失败时等待 canplay 再重试
-      let cleaned = false;
-      audio.play().catch(() => {
-        if (cleaned) return;
-        const onCanPlay = () => {
-          if (!cleaned) audio.play().catch(() => {});
-        };
-        audio.addEventListener('canplay', onCanPlay, { once: true });
-      });
-      return () => { cleaned = true; };
-    }
-  }, [state.currentSong?.id]);
+    const onMeta = () => {
+      audio.removeEventListener('loadedmetadata', onMeta);
+      metaHandlerRef.current = null;
+      // src 重载会把 playbackRate 重置回 defaultPlaybackRate，元数据就绪后补应用音效参数
+      fxEngineRef.current!.apply(fxParamsRef.current);
+      if (keepTime && resumeAt > 0 && isFinite(audio.duration) && audio.duration > 1) {
+        audio.currentTime = Math.min(resumeAt, audio.duration - 0.5);
+      }
+      if (wasPlaying) {
+        // V10.3: play() 失败时等待 canplay 再重试（防静默卡死）
+        audio.play().catch(() => {
+          const onReady = () => audio.play().catch(() => {});
+          audio.addEventListener('canplay', onReady, { once: true });
+        });
+      }
+    };
+    if (metaHandlerRef.current) audio.removeEventListener('loadedmetadata', metaHandlerRef.current);
+    metaHandlerRef.current = onMeta;
+    audio.addEventListener('loadedmetadata', onMeta);
+    // playToken：单曲列表播完绕回同首歌时 id/stem 不变，靠 token 触发重新加载
+  }, [state.currentSong?.id, state.stem, state.playToken]);
 
   // Sync play/pause（等音频就绪再播，避免首播延迟）
   // V9: 修复 canplay 监听器泄漏 — 暂停时清理未触发的监听器

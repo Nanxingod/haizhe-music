@@ -4,6 +4,7 @@ interface ElectronAPI {
   lyricHide: () => void;
   lyricUpdate: (data: { text: string; next: string }) => void;
   lyricConfig: (cfg: { bgDark?: number; color?: string; fontSize?: number; fontFamily?: string }) => void;
+  pickMusicDir: () => Promise<string | null>;
 }
 
 interface Window {
