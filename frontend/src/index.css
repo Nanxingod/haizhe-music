@@ -80,7 +80,13 @@ body::after {
 /* 侧边栏：::before = 独立模式的图片层（可 filter），::after = 渐变遮罩层（可读性），
    内容 z-[1] 在上。默认跟随主背景（::before 无图，body::before 透出，绝对无缝）；
    选择独立图片时由 JS 注入 background-image 覆盖 */
-.sidebar-bg { position: relative; }
+/* 定位基准必须放 @layer base：若写成未分层 CSS，会覆盖 Tailwind @layer utilities 里的
+   fixed/absolute 工具类（V12.7 修复：全屏歌词页 .player-bg + fixed 同时使用，
+   未分层 position:relative 优先级更高导致 fixed 失效，整页被拉伸放大、内容被裁剪）。 */
+@layer base {
+  .sidebar-bg { position: relative; }
+  .player-bg { position: relative; }
+}
 .sidebar-bg::before {
   content: '';
   position: absolute; inset: -30px; z-index: 0;
@@ -103,7 +109,6 @@ body::after {
 }
 
 /* 全屏播放页背景：::before = 图片层，遮罩和内容由子元素承载 */
-.player-bg { position: relative; }
 .player-bg::before {
   content: '';
   position: absolute; inset: -30px; z-index: 0;
