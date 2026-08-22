@@ -34,6 +34,8 @@ ARTISTS: list[Artist] = []
 async def startup():
     global ALL_SONGS, ARTISTS
     ALL_SONGS, ARTISTS = scan_all()
+    # 老式 song_id 命名的分离目录改为「原文件名_C/G」
+    stems_mod.migrate_legacy({s.id: s.file_path for s in ALL_SONGS})
     print(f"[Server] 启动完成，{len(ALL_SONGS)} 首歌就绪")
 
 
@@ -316,6 +318,8 @@ def set_config(body: dict):
     if not ok:
         raise HTTPException(400, msg)
     ALL_SONGS, ARTISTS = scan_all()
+    # 切换目录后同样执行老目录命名迁移并重建 stems 索引
+    stems_mod.migrate_legacy({s.id: s.file_path for s in ALL_SONGS})
     print(f"[Config] 音乐目录已切换: {msg}，共 {len(ALL_SONGS)} 首")
     return {"music_dir": msg, "songs": len(ALL_SONGS), "artists": len(ARTISTS)}
 

@@ -4,7 +4,8 @@
     python -m pip install audio-separator --target backend/vendor
 GPU 加速（本机已装 CUDA 版 torch，Roformer 高质量模型自动走 GPU）：
     python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126 --target backend/vendor
-- 每首歌产出 FLAC（<音乐目录>/人声分离/<song_id>/vocals.flac + instrumental.flac，与曲库同处持久化）
+- 每首歌产出 FLAC（<音乐目录>/人声分离/<原文件名>_<C|G>/vocals.flac + instrumental.flac，与曲库同处持久化）
+- 目录名 = 原歌曲文件名 + 处理方式：C=标准模型(CPU)，G=高质量模型(GPU)
 - 质量分级：
     standard: UVR-MDX-NET-Inst_HQ_3（64MB，CPU 约 1-3 分钟，质量良好）
     hq:       BS-Roformer Viperx 1297（SDR 12.98，约 840MB，GPU 快/CPU 极慢）
@@ -100,12 +101,50 @@ def is_available() -> bool:
         return False
 
 
+def _mode(quality: str) -> str:
+    """处理方式标识：standard/CPU → C，hq/GPU → G（用于分离目录命名）"""
+    return "G" if quality == "hq" else "C"
+
+
+# 分离目录名 = 「原文件名_处理方式(C/G)」，无法从目录名反推 song_id，
+# 因此用各目录 meta.json 里记录的 song_id 建立索引，按 song_id 快速定位。
+_song_dirs: dict[str, Path] = {}
+_index_built = False
+
+
+def _rebuild_index() -> None:
+    """扫描 stems_dir，从各目录 meta.json 重建 song_id -> 目录 索引。"""
+    global _index_built
+    with _lock:
+        _song_dirs.clear()
+        _index_built = True
+        if stems_dir().exists():
+            for d in stems_dir().iterdir():
+                if not d.is_dir():
+                    continue
+                try:
+                    meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                sid = meta.get("song_id")
+                if sid:
+                    _song_dirs[sid] = d
+
+
+def _song_dir(song_id: str) -> Optional[Path]:
+    if not _index_built:
+        _rebuild_index()  # 首次访问或音乐目录已切换后重建
+    return _song_dirs.get(song_id)
+
+
 def stems_path(song_id: str, stem: str) -> Path:
-    return stems_dir() / song_id / f"{stem}.flac"
+    d = _song_dir(song_id)
+    return (d / f"{stem}.flac") if d else stems_dir() / f"{stem}.flac"
 
 
 def _meta_path(song_id: str) -> Path:
-    return stems_dir() / song_id / "meta.json"
+    d = _song_dir(song_id)
+    return (d / "meta.json") if d else stems_dir() / "meta.json"
 
 
 def cached_quality(song_id: str) -> Optional[str]:
@@ -139,28 +178,48 @@ def is_busy() -> bool:
         return any(t.get("status") == "processing" for t in _tasks.values())
 
 
+def _new_dir_for(filepath: str, quality: str, song_id: str) -> Path:
+    """为新分离任务确定目标目录：<原文件名>_<C|G>。
+    若同名目录已被其他歌占用（meta.song_id 不一致），自动追加序号。"""
+    base = stems_dir() / f"{Path(filepath).stem}_{_mode(quality)}"
+    d = base
+    if d.exists():
+        try:
+            meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+        if meta.get("song_id") != song_id:
+            i = 2
+            while (stems_dir() / f"{base.name}_{i}").exists():
+                i += 1
+            d = stems_dir() / f"{base.name}_{i}"
+    d.parent.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def start_separation(song_id: str, filepath: str, quality: str = "standard") -> Optional[str]:
     """启动分离任务（后台线程）。成功返回 None，失败返回错误消息。"""
     if quality not in MODELS:
         quality = "standard"
-    if stems_path(song_id, "vocals").exists() and cached_quality(song_id) == quality:
+    existing = _song_dir(song_id)
+    if existing and cached_quality(song_id) == quality:
         return None  # 已有同质量缓存
     if is_busy():
         return "已有分离任务在进行中，请等待完成后再试"
+    out_dir = _new_dir_for(filepath, quality, song_id)
     with _lock:
         _tasks[song_id] = {"status": "processing", "progress": 2, "quality": quality}
-    threading.Thread(target=_run, args=(song_id, filepath, quality), daemon=True).start()
+    threading.Thread(target=_run, args=(song_id, filepath, quality, out_dir), daemon=True).start()
     return None
 
 
-def _run(song_id: str, filepath: str, quality: str) -> None:
+def _run(song_id: str, filepath: str, quality: str, out_dir: Path) -> None:
     try:
         if not _ensure_ffmpeg():
             raise RuntimeError("ffmpeg 不可用（系统未安装且 imageio-ffmpeg 缺失）")
 
         from audio_separator.separator import Separator
 
-        out_dir = stems_dir() / song_id
         out_dir.mkdir(parents=True, exist_ok=True)
         _set(song_id, status="processing", progress=5)
 
@@ -196,28 +255,32 @@ def _run(song_id: str, filepath: str, quality: str) -> None:
         if not vocals or not instrumental:
             raise RuntimeError(f"分离输出不完整: {outputs}")
 
-        vocals.replace(stems_path(song_id, "vocals"))
-        instrumental.replace(stems_path(song_id, "instrumental"))
-        # 记录质量标记（供 UI 展示与缓存判断）
+        vocals.replace(out_dir / "vocals.flac")
+        instrumental.replace(out_dir / "instrumental.flac")
+        # 记录归属（song_id/filepath）与质量标记（供 UI 展示、缓存判断与索引）
         try:
-            _meta_path(song_id).write_text(
-                json.dumps({"quality": quality, "gpu": use_gpu}), encoding="utf-8")
+            (out_dir / "meta.json").write_text(
+                json.dumps({"song_id": song_id, "filepath": filepath,
+                            "quality": quality, "gpu": use_gpu},
+                           ensure_ascii=False), encoding="utf-8")
         except Exception:
             pass
+        with _lock:
+            _song_dirs[song_id] = out_dir
         _set(song_id, status="ready", progress=100)
-        print(f"[Stems] 分离完成: {song_id} (quality={quality}, gpu={use_gpu})")
+        print(f"[Stems] 分离完成: {song_id} -> {out_dir.name} (quality={quality}, gpu={use_gpu})")
     except Exception as e:  # noqa: BLE001
         _set(song_id, status="error", error=str(e))
         print(f"[Stems] 分离失败 {song_id}: {e}")
 
 
 def delete_stems(song_id: str) -> None:
-    import shutil
-    d = stems_dir() / song_id
-    if d.exists():
+    d = _song_dir(song_id)
+    if d and d.exists():
         shutil.rmtree(d, ignore_errors=True)
     with _lock:
         _tasks.pop(song_id, None)
+        _song_dirs.pop(song_id, None)
 
 
 def list_ready() -> list[dict]:
@@ -226,11 +289,55 @@ def list_ready() -> list[dict]:
     if stems_dir().exists():
         for d in stems_dir().iterdir():
             if d.is_dir():
-                v, i = stems_path(d.name, "vocals"), stems_path(d.name, "instrumental")
+                v, i = d / "vocals.flac", d / "instrumental.flac"
                 if v.exists() and i.exists():
+                    try:
+                        meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+                    except Exception:
+                        meta = {}
+                    quality = meta.get("quality")
                     result.append({
-                        "song_id": d.name,
+                        "song_id": meta.get("song_id") or d.name,
                         "size_mb": round((v.stat().st_size + i.stat().st_size) / 1048576, 1),
-                        "quality": cached_quality(d.name) or "standard",
+                        "quality": quality if quality in MODELS else "standard",
                     })
     return sorted(result, key=lambda x: x["song_id"])
+
+
+def migrate_legacy(song_files: dict[str, str]) -> None:
+    """一次性迁移：把老式 song_id 命名的分离目录改名为「原文件名_处理方式(C/G)」。
+    老目录名即 song_id，meta 只有 quality/gpu；改名后补写 song_id/filepath。"""
+    if not stems_dir().exists():
+        return
+    for d in stems_dir().iterdir():
+        if not d.is_dir():
+            continue
+        meta_p = d / "meta.json"
+        try:
+            meta = json.loads(meta_p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if meta.get("song_id"):
+            continue  # 已是新式命名
+        filepath = song_files.get(d.name)  # 老目录名即 song_id
+        if not filepath:
+            continue  # 曲库已无此歌，无法取名，保留原样
+        quality = meta.get("quality", "standard")
+        if quality not in MODELS:
+            quality = "standard"
+        new_name = f"{Path(filepath).stem}_{_mode(quality)}"
+        target = stems_dir() / new_name
+        if target.exists():
+            i = 2
+            while (stems_dir() / f"{new_name}_{i}").exists():
+                i += 1
+            target = stems_dir() / f"{new_name}_{i}"
+        meta["song_id"] = d.name
+        meta["filepath"] = filepath
+        try:
+            meta_p.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+        d.replace(target)
+        print(f"[Stems] 迁移命名: {d.name} -> {target.name}")
+    _rebuild_index()
