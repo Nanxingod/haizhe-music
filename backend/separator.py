@@ -7,8 +7,11 @@ GPU 加速（本机已装 CUDA 版 torch，Roformer 高质量模型自动走 GPU
 - 每首歌产出 FLAC（<音乐目录>/人声分离/<原文件名>_<C|G>/vocals.flac + instrumental.flac，与曲库同处持久化）
 - 目录名 = 原歌曲文件名 + 处理方式：C=标准模型(CPU)，G=高质量模型(GPU)
 - 质量分级：
-    standard: UVR-MDX-NET-Inst_HQ_3（64MB，CPU 约 1-3 分钟，质量良好）
-    hq:       BS-Roformer Viperx 1297（SDR 12.98，约 840MB，GPU 快/CPU 极慢）
+    standard: MDX23C-8KFFT-InstVoc_HQ（MDX23C，2023，vocals SDR 11.95；CPU 约 5-15 分钟，
+              相比旧 UVR-MDX-NET-Inst_HQ_3(MDX-Net 第一代/2021) 质量明显更高）
+    hq:       BS PolarFormer（2025 论文 arXiv:2509.10534，Multisong vocals SDR 11.00，
+              102MB float16，比旧 BS-RoFormer Viperx 1297(10.87) 更高且更省显存；
+              需先运行 backend/setup_stem_models.py 下载权重并打 PoPE 补丁）
 """
 
 import json
@@ -48,10 +51,11 @@ if _legacy_stems.exists():
     except OSError:
         pass
 
-# 质量分级 → 模型文件（audio-separator 按文件名自动下载）
+# 质量分级 → 模型文件（audio-separator 按文件名自动下载，需在 UVR 官方注册表内；
+# hq 的 PolarFormer 不在注册表，靠 backend/setup_stem_models.py 一键下载+打补丁后本地加载）
 MODELS = {
-    "standard": "UVR-MDX-NET-Inst_HQ_3.onnx",
-    "hq": "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+    "standard": "MDX23C-8KFFT-InstVoc_HQ.ckpt",
+    "hq": "model_bs_polarformer_float16.ckpt",
 }
 
 _lock = threading.Lock()

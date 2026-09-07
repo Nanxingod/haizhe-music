@@ -35,7 +35,7 @@ export interface SearchResult {
 
 export type Stem = 'original' | 'vocals' | 'instrumental';
 
-/** 分离质量：standard=MDX(快) / hq=BS-Roformer(最强，需GPU) */
+/** 分离质量：standard=MDX23C(CPU快) / hq=BS PolarFormer(最新，需GPU+setup脚本) */
 export type StemQuality = 'standard' | 'hq';
 
 export interface StemStatus {

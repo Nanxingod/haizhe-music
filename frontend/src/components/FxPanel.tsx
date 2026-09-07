@@ -205,8 +205,8 @@ export function FxPanel({ onClose, anchorRef }: {
           </div>
           <p className="text-[11px] text-white/25 mb-2.5 leading-relaxed">
             {quality === 'hq'
-              ? (stemStatus.gpu ? 'BS-Roformer 顶级模型 · GPU 约 30 秒' : 'BS-Roformer 顶级模型（首次需下载约 640MB）· 无 GPU 时 CPU 约 20-40 分钟')
-              : 'MDX 模型，CPU 约 1-3 分钟，质量良好'}
+              ? (stemStatus.gpu ? 'BS PolarFormer 最新模型 · GPU 约 30 秒' : 'BS PolarFormer 最新模型（首次需运行 setup_stem_models.py 下载约 102MB）· 无 GPU 时 CPU 约 20-40 分钟')
+              : 'MDX23C 模型，CPU 约 5-15 分钟，质量较旧版显著提升'}
           </p>
           <button onClick={() => startSeparation()} disabled={busy}
             className="w-full py-3 rounded-lg text-sm bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors disabled:opacity-50">

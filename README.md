@@ -247,19 +247,30 @@ cd backend
 python -m pip install audio-separator==0.18.0 onnxruntime imageio-ffmpeg --target vendor
 ```
 
-**GPU 加速**（NVIDIA 显卡，推荐——高质量模型 BS-Roformer 在 GPU 上约 30-60 秒/首，CPU 需 20-40 分钟）：
+**GPU 加速**（NVIDIA 显卡，推荐——高质量模型 BS PolarFormer 在 GPU 上约 30-60 秒/首，CPU 需 20-40 分钟）：
 
 ```bash
 # CUDA 版 torch（2.8.0 + cu126，约 2.9GB 下载）
 python -m pip install torch==2.8.0 torchvision --index-url https://download.pytorch.org/whl/cu126 --target vendor
 ```
 
-**模型自动下载**：首次对歌曲执行分离时自动从 HuggingFace/UVR 官方源下载到 `backend/cache/stem_models/`（标准 MDX 模型约 64MB；高质量 BS-Roformer 约 640MB），全程无需手动操作，仓库不含任何模型文件。模型为按需加载——只听原曲永远不会加载，首次点击分离时才下载/载入。
+**高质量模型一键部署**（`backend/setup_stem_models.py`，幂等可重复运行）：
+
+```bash
+python backend/setup_stem_models.py
+```
+
+它会完成三件事：
+1. 给 audio-separator 打 PoPE 推理补丁（PolarFormer 使用极坐标位置编码，原库不支持）
+2. 下载 BS PolarFormer 权重（102MB，float16）与 yaml 到 `backend/cache/stem_models/`，带 sha256 校验
+3. 生成修正版 yaml（对齐 audio-separator 推理所需的 hop_length / inference / stem 命名）
+
+标准档 MDX23C 无需手动操作，首次分离时自动下载。模型为按需加载——只听原曲永远不会加载，首次点击分离时才下载/载入。
 
 **分离结果持久化**在 `<你的音乐目录>/人声分离/<歌曲ID>/`（vocals.flac + instrumental.flac），与曲库同处、随曲库迁移，可在设置页管理删除。
 
-- 标准：`UVR-MDX-NET-Inst_HQ_3.onnx`
-- 高质量：`model_bs_roformer_ep_317_sdr_12.9755.ckpt`（UVR 榜 SDR 12.98，需 GPU）
+- 标准：`MDX23C-8KFFT-InstVoc_HQ.ckpt`（MDX23C，2023，vocals SDR 11.95；CPU 约 5-15 分钟/首）
+- 高质量：`model_bs_polarformer_float16.ckpt`（BS PolarFormer，2025，Multisong vocals SDR 11.00，102MB，需 GPU + 上述脚本）
 
 ### 2. 配置音乐目录
 
