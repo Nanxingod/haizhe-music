@@ -4,6 +4,8 @@
 
 一个基于 **Python FastAPI + React + Electron** 的本地音乐播放器，扫描本地 MP3 文件，自动提取 ID3 元数据/封面/歌词，提供完整的桌面端播放体验。
 
+> 📖 **想改代码？** 看 [DEV_GUIDE.md](DEV_GUIDE.md) —— 逐文件讲解实现细节、数据流、设计决策与踩坑记录。本文档只讲"是什么、怎么跑"。
+
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9+-blue?logo=python" />
   <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react" />
@@ -19,6 +21,8 @@
 |------|------|
 | 🎵 播放引擎 | MP3 流式播放（HTTP Range 请求 + 128KB 缓冲）、进度拖拽、音量调节/静音、音量记忆 |
 | 🔀 播放模式 | 顺序播放 / 列表循环 / 单曲循环 / 随机播放 · 模式记忆持久化 |
+| 🎛️ 音效引擎 | 倍速 0.5–2x · 升降 KEY ±12 半音 · 小黄人变声 · 参数持久化 |
+| 🎤 音轨切换 | 原唱 / 人声 / 伴奏三轨自由切换（AI 人声分离） · 切轨保留播放进度 |
 | 📝 歌词系统 | LRC 文件解析 · 全屏歌词滚动高亮 · 点击歌词行跳转 · 自动居中滚动 |
 | 🖼️ 封面系统 | MP3 ID3 内嵌封面提取 · 150px 磁盘缓存秒加载 · 全屏原图按需读取 |
 | 🎤 歌手分类 | 按首字母分组 · 多歌手智能拆分（`徐良、阿悄` → 两个独立歌手） |
@@ -162,6 +166,39 @@ Electron IPC 架构：
 
 配置实时同步：用户改设置 → localStorage → tick 循环 500ms 比对缓存 → 仅变化时才发 IPC `lyric-config`。
 
+### 6. 音效引擎（两层架构）
+
+浏览器改音频有两条路，代价完全不同，所以分成两层：
+
+```
+第 1 层  原生属性层（零音质代价、无需用户手势）
+   倍速 0.5–2x        → audio.playbackRate
+   小黄人变声         → audio.preservesPitch = false
+
+第 2 层  WebAudio 层（仅升降 KEY ≠ 0 时启用）
+   MediaElementSource → SignalsmithStretch(WASM + AudioWorklet) → destination
+```
+
+⚠️ **音质保护原则**：`createMediaElementSource` 是**不可逆**的——一旦建立，该元素的输出就永久改道进 AudioContext。因此：
+
+- 移调 ≠ 0 **才**建管线；移调归零立刻切回直通（`src → destination`，位透明无损）
+- 从未移调过则完全不建管线，原曲走浏览器原生路径，零处理零损失
+- 非手势上下文不建图（suspended 的 AudioContext 会吞掉音频导致静音），持久化恢复的移调等首次手势后再激活
+
+变调算法从早期的 SoundTouch（ScriptProcessor / 主线程）升级为 **Signalsmith Stretch**（WASM + AudioWorklet / 音频线程），主线程卡顿不再导致爆音。
+
+### 7. 人声/伴奏分离
+
+```
+点击分离 → POST /api/stems/{id}/separate?quality=standard|hq
+        → 后端起后台线程（全局串行，防 GPU OOM）
+        → 前端 2s 轮询进度
+        → 产出 <音乐目录>/人声分离/<歌曲文件名>_C|_G/{vocals,instrumental}.flac
+        → 播放时 /api/stream/{id}?stem=vocals|instrumental 直出 FLAC 音轨
+```
+
+分离结果用「原文件名 + 处理方式」命名（C=标准/CPU，G=高质量/GPU），便于在文件管理器里辨认；`song_id` 的映射靠每个目录里的 `meta.json` 建索引。
+
 ---
 
 ## 📂 项目结构
@@ -179,8 +216,12 @@ music-player/
 │   ├── scanner.py             # MP3 扫描 · ID3 解析 · 封面预提取
 │   ├── lyrics.py              # LRC 歌词解析
 │   ├── models.py              # Pydantic 数据模型
-│   ├── config.json            # 配置文件（音乐目录路径）
+│   ├── separator.py           # 人声/伴奏分离（任务管理 + 结果索引）
+│   ├── setup_stem_models.py   # 高质量分离模型一键部署（下载 + PoPE 补丁）
+│   ├── config.json            # 配置文件（音乐目录路径，运行时可改）
 │   ├── requirements.txt       # Python 依赖
+│   ├── haizhe-backend.spec    # PyInstaller 打包配置
+│   ├── vendor/                # 可选依赖（audio-separator 等，按需安装）
 │   └── cache/covers/          # 封面缩略图磁盘缓存 (150px JPEG)
 │
 ├── frontend/
@@ -188,11 +229,13 @@ music-player/
 │   │   ├── main.tsx           # React 入口
 │   │   ├── App.tsx            # 路由 + 全局布局 + 背景初始化
 │   │   ├── store.tsx          # 播放器状态管理 (useReducer + Context)
+│   │   ├── fx.ts              # 音效引擎（倍速 / 升降 KEY / 小黄人）
 │   │   ├── api.ts             # 后端 API 调用
 │   │   ├── types.ts           # TypeScript 类型定义
 │   │   ├── components/
 │   │   │   ├── Sidebar.tsx    # 侧边栏导航
 │   │   │   ├── PlayerBar.tsx  # 底部播放栏 + 全屏歌词面板 + PiP 悬浮窗
+│   │   │   ├── FxPanel.tsx    # 音效面板（倍速/KEY/小黄人/音轨）
 │   │   │   ├── TitleBar.tsx   # 自定义标题栏（Electron 环境）
 │   │   │   └── FloatingLyrics.tsx  # 设置页悬浮窗预览
 │   │   └── pages/
@@ -200,7 +243,7 @@ music-player/
 │   │       ├── ArtistsPage.tsx     # 歌手列表
 │   │       ├── ArtistSongsPage.tsx # 歌手歌曲
 │   │       ├── SearchPage.tsx      # 搜索页
-│   │       └── SettingsPage.tsx    # 设置（背景/字体/悬浮窗配置）
+│   │       └── SettingsPage.tsx    # 设置（曲库/背景/字体/悬浮窗）
 │   └── public/bg/
 │       ├── main/              # 主页背景图
 │       ├── sidebar/           # 侧边栏背景图
@@ -267,7 +310,7 @@ python backend/setup_stem_models.py
 
 标准档 MDX23C 无需手动操作，首次分离时自动下载。模型为按需加载——只听原曲永远不会加载，首次点击分离时才下载/载入。
 
-**分离结果持久化**在 `<你的音乐目录>/人声分离/<歌曲ID>/`（vocals.flac + instrumental.flac），与曲库同处、随曲库迁移，可在设置页管理删除。
+**分离结果持久化**在 `<你的音乐目录>/人声分离/<歌曲文件名>_C/`（标准档）或 `_G/`（高质量档），目录内含 `vocals.flac` + `instrumental.flac` + `meta.json`。与曲库同处、随曲库迁移，可在设置页管理删除。
 
 - 标准：`MDX23C-8KFFT-InstVoc_HQ.ckpt`（MDX23C，2023，vocals SDR 11.95；CPU 约 5-15 分钟/首）
 - 高质量：`model_bs_polarformer_float16.ckpt`（BS PolarFormer，2025，Multisong vocals SDR 11.00，102MB，需 GPU + 上述脚本）
@@ -366,6 +409,25 @@ npx electron-builder --win --x64
 | 悬浮窗歌词不同步 | `useEffect` 依赖从 `currentTime` 改为 `[pipOn, songId]`，通过 `timeRef` 读实时位置 |
 | 桌面歌词始终"等待播放" | IPC 消息在窗口加载完成前到达被丢弃 → `lyricReady` 标志位 + 暂存 `pendingLyricCfg` |
 
+### 桌面体验攻坚（V11）
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| 双击快捷方式总弹终端，关终端 = 杀应用 | VBS 误用批处理语法 `%~dp0`（VBS 不展开）；VBS 内 UTF-8 中文注释被 wscript 按 GBK 解析出错 | VBS 改纯 ASCII；快捷方式指向 `wscript.exe` |
+| 任务栏显示 Electron 官方图标 | 缺 AppUserModelID | `icon` + `setAppUserModelId('com.haizhe.music')` |
+| 退出后 8765/5173 端口仍被占 | `shell:true` 的 `kill()` 只杀 cmd 壳，python/vite 变孤儿 | 同步 `taskkill /T /F` 杀进程树 |
+| 重复启动开多个窗口 | 无单实例锁 | `requestSingleInstanceLock()` + 聚焦已有窗口 |
+
+### 音效与音轨（V12）
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| 移调后原曲音质受损 | `createMediaElementSource` 不可逆，建了图就永久改道 | 不建图时位透明直通；移调归零立刻切回 |
+| 重启后移调导致静音 | 无手势时 AudioContext 处于 suspended，会吞掉音频 | 非手势不建图，首次手势后 `gestureApply()` 补建 |
+| 切歌后倍速掉回 1x | `src` 重载触发 load 算法，把 `playbackRate` 重置为 `defaultPlaybackRate` | 两个属性同步设置 + `loadedmetadata` 后补应用 |
+| 主线程卡顿时变调爆音 | SoundTouch 跑在 ScriptProcessor（主线程） | 换 Signalsmith Stretch（WASM + AudioWorklet，音频线程） |
+| 单曲循环播完绕回同首歌不重载 | `id`/`stem` 都没变，effect 不触发 | 引入 `playToken` 自增令牌 |
+
 ### 多歌手拆分
 
 ```python
@@ -383,7 +445,9 @@ ARTIST_SPLIT_RE = re.compile(r"[、,，/&]|\bfeat\.?\b", re.IGNORECASE)
 
 ## 🔮 后续规划
 
-- [ ] PyInstaller 打包 → 完全免 Python 的独立 .exe
+- [ ] PyInstaller 打包 → 完全免 Python 的独立 .exe（`backend/haizhe-backend.spec` 已备好，打包链路待打通）
+- [ ] 音效：均衡器（EQ）、混响
+- [ ] 批量人声分离（当前全局串行，一次一首）
 - [ ] 系统托盘 + 最小化到托盘
 - [ ] 全局快捷键（播放/暂停/切歌）
 - [ ] 播放历史 + 收藏
