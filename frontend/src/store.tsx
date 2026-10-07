@@ -23,7 +23,8 @@ type Action =
   | { type: 'SET_RATE'; rate: number }
   | { type: 'SET_PITCH'; semitones: number }
   | { type: 'TOGGLE_CHIPMUNK' }
-  | { type: 'SET_STEM'; stem: Stem };
+  | { type: 'SET_STEM'; stem: Stem }
+  | { type: 'SET_ALL_SONGS'; songs: Song[] };
 
 // ⚡ 高频值全局 ref — 供 PlayerBar 的 PiP tick / 歌词滚动读取，跳过 React 渲染链路
 export const timeRef = { current: 0 };
@@ -78,15 +79,40 @@ const initialState: PlayerState = {
   chipmunk: persistedFx.chipmunk,
   stem: 'original',
   playToken: 0,
+  allSongs: [],
+  shufflePrevId: null,
 };
+
+/** 换歌通用重置：切换 currentSong 时统一处理进度 / 音效 / 音轨 / playToken / 回退记录。
+ *  音轨·移调·小黄人是"针对这首歌"的临时设置——新歌通常没有分离缓存（伴奏会 404），恢复原曲最稳妥。 */
+function switchTo(state: PlayerState, song: Song | null, extra: Partial<PlayerState> = {}): PlayerState {
+  return {
+    ...state,
+    currentSong: song,
+    currentTime: 0,
+    stem: 'original', pitchSemitones: 0, chipmunk: false,
+    playToken: state.playToken + 1,
+    shufflePrevId: null,
+    ...extra,
+  };
+}
+
+/** shuffle 随机池：优先整曲库（跨歌手/搜索子集随机），全库未加载完成时退化为当前列表 */
+function shufflePool(state: PlayerState): Song[] {
+  return state.allSongs.length > 0 ? state.allSongs : state.playlist;
+}
+
+/** 从池中随机取一首，排除当前歌；池内仅此一首时返回自身 */
+function randomFrom(pool: Song[], excludeId: string): Song {
+  const candidates = pool.filter((s: Song) => s.id !== excludeId);
+  const src = candidates.length > 0 ? candidates : pool;
+  return src[Math.floor(Math.random() * src.length)];
+}
 
 function reducer(state: PlayerState, action: Action): PlayerState {
   switch (action.type) {
     case 'SET_SONG':
-      // 切歌重置音效：音轨/移调/小黄人是"针对这首歌"的临时设置，
-      // 换歌后新歌通常没有分离缓存（伴奏会 404 连环跳歌），恢复原曲最稳妥
-      return { ...state, currentSong: action.song, isPlaying: false, currentTime: 0, duration: action.song.duration || 0,
-        stem: 'original', pitchSemitones: 0, chipmunk: false, playToken: state.playToken + 1 };
+      return switchTo(state, action.song, { isPlaying: false, duration: action.song.duration || 0 });
     case 'PLAY':
       return { ...state, isPlaying: true };
     case 'PAUSE':
@@ -101,18 +127,10 @@ function reducer(state: PlayerState, action: Action): PlayerState {
       return { ...state, volume: action.volume, isMuted: false };
     case 'TOGGLE_MUTE':
       return { ...state, isMuted: !state.isMuted };
-    case 'SET_PLAYLIST':
-      return {
-        ...state,
-        playlist: action.playlist,
-        currentSong: action.playlist[action.startIndex ?? 0] || state.currentSong,
-        isPlaying: false,
-        currentTime: 0,
-        stem: 'original', pitchSemitones: 0, chipmunk: false,
-        playToken: state.playToken + 1,
-      };
-    case 'SET_MODE':
-      return { ...state, playMode: action.mode };
+    case 'SET_PLAYLIST': {
+      const song = action.playlist[action.startIndex ?? 0] || state.currentSong;
+      return switchTo(state, song, { playlist: action.playlist, isPlaying: false });
+    }
     case 'SET_RATE':
       return { ...state, playbackRate: Math.min(2, Math.max(0.5, action.rate)) };
     case 'SET_PITCH':
@@ -121,32 +139,36 @@ function reducer(state: PlayerState, action: Action): PlayerState {
       return { ...state, chipmunk: !state.chipmunk };
     case 'SET_STEM':
       return { ...state, stem: action.stem };
+    case 'SET_ALL_SONGS':
+      // 只为 shuffle 提供全库随机池，不改当前播放上下文
+      return { ...state, allSongs: action.songs };
+    case 'SET_MODE':
+      return { ...state, playMode: action.mode, shufflePrevId: null };
     case 'NEXT': {
-      if (!state.currentSong || state.playlist.length === 0) return state;
+      if (!state.currentSong) return state;
+      // shuffle：从整曲库随机（而非当前歌手/搜索子集），并记住当前歌，给 PREV 留一首回退空间
+      if (state.playMode === 'shuffle') {
+        const pool = shufflePool(state);
+        if (pool.length === 0) return state;
+        return switchTo(state, randomFrom(pool, state.currentSong.id), { shufflePrevId: state.currentSong.id });
+      }
+      if (state.playlist.length === 0) return state;
       const idx = state.playlist.findIndex((s: Song) => s.id === state.currentSong!.id);
-      const nextIdx = state.playMode === 'shuffle'
-        ? Math.floor(Math.random() * state.playlist.length)
-        : (idx + 1) % state.playlist.length;
-      return {
-        ...state,
-        currentSong: state.playlist[nextIdx] || state.currentSong,
-        currentTime: 0,
-        // 自然播完/手动切下一首：恢复原曲设置（伴奏等音轨在新歌上无缓存会 404）
-        stem: 'original', pitchSemitones: 0, chipmunk: false,
-        playToken: state.playToken + 1,
-      };
+      return switchTo(state, state.playlist[(idx + 1) % state.playlist.length] || state.currentSong);
     }
     case 'PREV': {
-      if (!state.currentSong || state.playlist.length === 0) return state;
+      if (!state.currentSong) return state;
+      // shuffle：优先回退到记住的上一首（只回退一首），记录消费后即清空；再按则继续随机
+      if (state.playMode === 'shuffle') {
+        const pool = shufflePool(state);
+        if (pool.length === 0) return state;
+        const back = state.shufflePrevId ? pool.find((s: Song) => s.id === state.shufflePrevId) : undefined;
+        if (back && back.id !== state.currentSong.id) return switchTo(state, back);
+        return switchTo(state, randomFrom(pool, state.currentSong.id));
+      }
+      if (state.playlist.length === 0) return state;
       const idx = state.playlist.findIndex((s: Song) => s.id === state.currentSong!.id);
-      const prevIdx = (idx - 1 + state.playlist.length) % state.playlist.length;
-      return {
-        ...state,
-        currentSong: state.playlist[prevIdx] || state.currentSong,
-        currentTime: 0,
-        stem: 'original', pitchSemitones: 0, chipmunk: false,
-        playToken: state.playToken + 1,
-      };
+      return switchTo(state, state.playlist[(idx - 1 + state.playlist.length) % state.playlist.length] || state.currentSong);
     }
     default:
       return state;
@@ -237,12 +259,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (isFinite(d)) dispatch({ type: 'SET_DURATION', duration: d });
   }, []);
 
-  // 🔥 冷启动预热：应用加载时建立后端连接 + 初始化音频管线
+  // 🔥 冷启动预热：应用加载时建立后端连接 + 初始化音频管线 + 缓存全曲库（shuffle 随机池）
   useEffect(() => {
     const warmup = async () => {
       try {
-        const { songs } = await api.getSongs('', 1);
+        // 缓存整曲库，作为 shuffle 模式的随机池（NEXT 始终从全库随机）
+        const { songs } = await api.getSongs('', 1000);
+        if (songs.length) dispatch({ type: 'SET_ALL_SONGS', songs });
         if (!songs.length) return;
+        // 音频管线预热（沿用原逻辑）
         const audio = new Audio();
         audio.preload = 'auto';
         audio.volume = 0;
@@ -570,6 +595,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
 
   const play = useCallback((song: Song, playlist?: Song[]) => {
+    // 用户显式点歌 = 新意图：重置错误跳歌计数/冷却，避免历史失败把播放锁死
+    errorSkipCount.current = 0;
+    errorCooldownRef.current = false;
     if (playlist) dispatch({ type: 'SET_PLAYLIST', playlist, startIndex: playlist.findIndex(s => s.id === song.id) });
     else dispatch({ type: 'SET_SONG', song });
     dispatch({ type: 'PLAY' });
@@ -578,6 +606,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [state.playMode, persistPlayerState]);
 
   const playArtist = useCallback((songs: Song[], startIndex = 0) => {
+    // 同上：手动播放重置错误防御
+    errorSkipCount.current = 0;
+    errorCooldownRef.current = false;
     dispatch({ type: 'SET_PLAYLIST', playlist: songs, startIndex });
     dispatch({ type: 'PLAY' });
     // V10: 记住最后播放的歌

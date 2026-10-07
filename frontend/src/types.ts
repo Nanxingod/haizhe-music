@@ -69,6 +69,10 @@ export interface PlayerState {
   chipmunk: boolean;
   stem: Stem;
   /** V12.3: 每次切歌/重播自增，驱动 audio src effect 重新加载
-   *  （单曲列表播完绕回同首歌时 id/stem 都不变，靠此 token 触发） */
+   *   （单曲列表播完绕回同首歌时 id/stem 都不变，靠此 token 触发） */
   playToken: number;
+  /** V13: 整曲库缓存，作为 shuffle 模式的随机池（NEXT 始终从全库随机，而非当前子集） */
+  allSongs: Song[];
+  /** V13: shuffle 模式下记住"上一首"，PREV 回退到它（一首回退空间，再往上是随机） */
+  shufflePrevId: string | null;
 }
