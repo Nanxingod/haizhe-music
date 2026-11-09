@@ -53,6 +53,73 @@ export interface StemItem {
   quality?: StemQuality;
 }
 
+/** V13: 相关视频检索（现场版 / 翻唱 / MV） */
+export type RelinkSource = 'bilibili' | 'douyin';
+export type RelinkCat = 'live' | 'cover' | 'mv' | 'other';
+/** 结果来自哪：network=刚搜的，memory=进程内缓存，disk=本地磁盘缓存 */
+export type RelinkOrigin = 'network' | 'memory' | 'disk';
+
+export interface RelinkItem {
+  title: string;
+  url: string;
+  source: RelinkSource;
+  source_label: string;
+  author: string;
+  play: number;
+  duration: string;
+  /** AI 写的一句话短评，规则排序时为空 */
+  blurb: string;
+  score: number;
+}
+
+export interface RelinkGroup {
+  key: RelinkCat;
+  label: string;
+  items: RelinkItem[];
+}
+
+export interface RelinkResult {
+  song: { id: string; title: string; artist: string };
+  /** 是否用了 DeepSeek 归类打分 */
+  ai: boolean;
+  /** true = 抖音/AI 还在后台补，稍后轮询 */
+  pending: boolean;
+  /** 结果来源：network / memory / disk */
+  source: RelinkOrigin;
+  total: number;
+  groups: RelinkGroup[];
+  notes: string[];
+  took_ms: number;
+  /** 这份结果是什么时候搜出来的（unix 秒） */
+  fetched_at: number;
+}
+
+export interface RelinkConfig {
+  /** DeepSeek key：同时支撑 AI 归类 与 抖音搜索（DeepSeek Search） */
+  deepseek: boolean;
+  /** 搜索能力（= 有 DeepSeek key） */
+  search: boolean;
+  /** Tavily key：仅作抖音的备用通道，可选 */
+  tavily: boolean;
+}
+
+/** V13.5: 歌手简介（网易云公开接口） */
+export interface ArtistInfo {
+  found: boolean;
+  name: string;
+  alias: string[];
+  avatar: string;
+  /** 中文简介，可能为空（源数据质量差时后端会判为无效） */
+  brief: string;
+  /** 简介来源：api=网易云原文，ai=DeepSeek 补写，''=无 */
+  brief_source: string;
+  music_count: number;
+  album_count: number;
+  fans: number;
+  source: string;
+  fetched_at: number;
+}
+
 export interface PlayerState {
   currentSong: Song | null;
   playlist: Song[];
@@ -75,4 +142,40 @@ export interface PlayerState {
   allSongs: Song[];
   /** V13: shuffle 模式下记住"上一首"，PREV 回退到它（一首回退空间，再往上是随机） */
   shufflePrevId: string | null;
+}
+
+/** V14: 旋律（人声轨音高提取） */
+export interface MelodyNote {
+  /** 起始秒 */
+  t: number;
+  /** 时长秒 */
+  d: number;
+  /** MIDI 音高（69=A4） */
+  midi: number;
+  /** 音名，如 A4 / F#4 */
+  note: string;
+  /** 相对十二平均律的音分偏差 */
+  cents: number;
+}
+
+export interface MelodyLine {
+  t: number;
+  end: number;
+  text: string;
+  notes: MelodyNote[];
+}
+
+export interface MelodyData {
+  /** ok / no_vocals / error */
+  status: 'ok' | 'no_vocals' | 'error';
+  message?: string;
+  /** crepe/cuda 或 pyin */
+  method?: string;
+  duration?: number;
+  fps?: number;
+  notes: MelodyNote[];
+  lines: MelodyLine[];
+  took_ms?: number;
+  cached: boolean;
+  has_vocals: boolean;
 }

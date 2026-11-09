@@ -6,6 +6,7 @@ import { PlayerProvider } from './store';
 import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { PlayerBar } from './components/PlayerBar';
+import { bindPipLockSync } from './pipLock';
 import { AllSongsPage } from './pages/AllSongsPage';
 import { ArtistsPage } from './pages/ArtistsPage';
 import { ArtistSongsPage } from './pages/ArtistSongsPage';
@@ -96,6 +97,10 @@ function BackgroundInit() {
 }
 
 export default function App() {
+  // 桌词窗口里点的锁要能回传到主界面（角标/设置开关）。这一段必须常驻，
+  // 不能挂在某个只在锁定时才渲染的组件上，否则"刚锁上"的那一刻没人订阅。
+  useEffect(() => bindPipLockSync(), []);
+
   return (
     <BrowserRouter>
       <PlayerProvider>

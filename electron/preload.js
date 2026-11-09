@@ -16,6 +16,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   lyricHide: () => ipcRenderer.send('lyric-hide'),
   lyricUpdate: (data) => ipcRenderer.send('lyric-update', data),
   lyricConfig: (cfg) => ipcRenderer.send('lyric-config', cfg),
+  lyricLock: (locked) => ipcRenderer.send('lyric-lock', !!locked),
+  // 主进程回推锁定状态（在桌词窗口里点的锁也要让主窗口知道）
+  onLyricLockState: (cb) => {
+    const h = (_e, v) => cb(v);
+    ipcRenderer.on('lyric-lock-state', h);
+    return () => ipcRenderer.removeListener('lyric-lock-state', h);
+  },
   // 音乐目录选择
   pickMusicDir: () => ipcRenderer.invoke('pick-music-dir'),
+  // ⚡ V13: 用系统默认浏览器打开外链（相关视频推荐面板）
+  openExternal: (url) => ipcRenderer.invoke('open-external', url),
 });

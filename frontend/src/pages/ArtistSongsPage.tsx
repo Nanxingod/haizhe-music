@@ -3,7 +3,7 @@
 import { useState, useEffect, memo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import type { Song } from '../types';
+import type { Song, ArtistInfo } from '../types';
 import { api } from '../api';
 import { usePlayer } from '../store';
 import { CoverThumbnail } from '../components/Sidebar';
@@ -15,11 +15,65 @@ function formatDuration(s: number | null): string {
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
+/** 19153182 → 1915.3万 */
+function fmtCount(n: number): string {
+  if (!n) return '';
+  if (n >= 100000000) return `${(n / 100000000).toFixed(1)}亿`;
+  if (n >= 10000) return `${(n / 10000).toFixed(1)}万`;
+  return String(n);
+}
+
+/** 歌手简介卡（V13.5）：默认折两行，可展开 */
+function ArtistBio({ info }: { info: ArtistInfo }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasBio = !!info.brief;
+  if (!info.found || (!hasBio && info.alias.length === 0 && !info.fans)) return null;
+  const long = info.brief.length > 64;
+
+  return (
+    <div className="px-8 max-md:px-4 pb-3">
+      <div className="glass-light rounded-2xl p-4 flex gap-4">
+        {info.avatar && (
+          <img src={info.avatar} alt={info.name} loading="lazy"
+            className="w-16 h-16 rounded-full object-cover shrink-0 bg-white/5"
+            onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline gap-2 flex-wrap">
+            <span className="text-sm font-medium text-white/85">{info.name}</span>
+            {info.alias.map(a => (
+              <span key={a} className="text-[11px] text-white/25">{a}</span>
+            ))}
+            {info.fans > 0 && <span className="text-[11px] text-white/20">{fmtCount(info.fans)} 粉丝</span>}
+            {info.music_count > 0 && <span className="text-[11px] text-white/20">{info.music_count} 首作品</span>}
+          </div>
+          {hasBio ? (
+            <>
+              <p className={`text-[13px] text-white/45 leading-relaxed mt-1.5 ${expanded ? '' : 'line-clamp-2'}`}>
+                {info.brief}
+              </p>
+              {long && (
+                <button onClick={() => setExpanded(v => !v)}
+                  className="text-[11px] text-[var(--accent)]/70 hover:text-[var(--accent)] mt-1 transition-colors">
+                  {expanded ? '收起' : '展开'}
+                </button>
+              )}
+            </>
+          ) : (
+            <p className="text-[11px] text-white/20 mt-1.5">暂无简介</p>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export const ArtistSongsPage = memo(function ArtistSongsPage() {
   const { name } = useParams<{ name: string }>();
   const artistName = decodeURIComponent(name || '');
   const [songs, setSongs] = useState<Song[]>([]);
   const [loading, setLoading] = useState(true);
+  const [info, setInfo] = useState<ArtistInfo | null>(null);
   const { play, state } = usePlayer();
 
   useEffect(() => {
@@ -27,6 +81,16 @@ export const ArtistSongsPage = memo(function ArtistSongsPage() {
     api.getArtistSongs(artistName)
       .then(setSongs)
       .finally(() => setLoading(false));
+  }, [artistName]);
+
+  // 歌手简介：独立请求，失败/无数据都不影响歌曲列表
+  useEffect(() => {
+    setInfo(null);
+    let alive = true;
+    api.getArtistInfo(artistName)
+      .then(d => { if (alive) setInfo(d); })
+      .catch(() => {});
+    return () => { alive = false; };
   }, [artistName]);
 
   const isCurrent = (s: Song) => state.currentSong?.id === s.id;
@@ -44,6 +108,9 @@ export const ArtistSongsPage = memo(function ArtistSongsPage() {
           <p className="text-white/30 text-sm mt-1">{songs.length} 首歌曲</p>
         </div>
       </div>
+
+      {/* 歌手简介（来自网易云公开接口，失败就整块不显示） */}
+      {info && <ArtistBio info={info} />}
 
       {/* Song list - no sticky header that could block clicks */}
       <div className="px-8 py-2 max-md:px-2">

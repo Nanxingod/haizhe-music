@@ -62,3 +62,6 @@ backend/config.json
 desktop.log
 .launch-test.txt
 
+
+# 本地构建校验产物
+.build-check/

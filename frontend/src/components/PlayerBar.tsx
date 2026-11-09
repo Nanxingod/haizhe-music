@@ -7,6 +7,9 @@ import type { Lyrics } from '../types';
 import { api } from '../api';
 import { CoverThumbnail } from './Sidebar';
 import { FxPanel } from './FxPanel';
+import { MelodyPanel } from './MelodyPanel';
+import { isPipLocked, setPipLocked } from '../pipLock';
+import { RelinkPanel } from './RelinkPanel';
 
 function fmt(s: number): string {
   if (!s || !isFinite(s)) return '0:00';
@@ -40,8 +43,27 @@ function ModeIcon({ mode, size = 18 }: { mode: string; size?: number }) {
 /* ── 桌面歌词悬浮窗（Document PiP） ── */
 let pipWin: Window | null = null;
 
+/** 桌面歌词窗口是独立 html，拿不到 CSS 变量，这里把皮肤色算好传过去 */
+function readPipSkin() {
+  try {
+    const cs = getComputedStyle(document.documentElement);
+    const accent = cs.getPropertyValue('--accent').trim();
+    const border = cs.getPropertyValue('--skin-border').trim();
+    const surface = cs.getPropertyValue('--skin-surface').trim();
+    const skin = document.documentElement.dataset.skin || 'classic';
+    if (skin === 'classic' || !surface) return { accent, name: skin };
+    const m = surface.match(/rgba?\(([^)]+)\)/);
+    const rgb = m ? m[1].split(',').slice(0, 3).map(x => x.trim()).join(',') : '10,10,18';
+    const a = Number(localStorage.getItem('haizhe-pip-bg') || 0.75);
+    return { accent, border, surface: `rgba(${rgb},${a})`, name: skin };
+  } catch {
+    return {};
+  }
+}
+
 function readPipCfg() {
   return {
+    skin: readPipSkin(),
     bgDark: Number(localStorage.getItem('haizhe-pip-bg') || 0.75),
     color: localStorage.getItem('haizhe-pip-color') || '#ff9eaf',
     fontSize: Number(localStorage.getItem('haizhe-pip-size') || 20),
@@ -108,11 +130,18 @@ export function PlayerBar() {
   const [lyrics, setLyrics] = useState<Lyrics | null>(null);
   const [lyricLoading, setLyricLoading] = useState(false);
   const [pipOn, setPipOn] = useState(false);
+  const [pipLocked, setPipLockedState] = useState(isPipLocked);
   const [fxOn, setFxOn] = useState(false);
+  // 'song' | 'artist' | null —— 两个面板互斥，同时只看一个
+  const [linkOn, setLinkOn] = useState<'song' | 'artist' | null>(null);
+  const [melodyOn, setMelodyOn] = useState(false);
+  const melodyBtnRef = useRef<HTMLButtonElement>(null);
+  const titleRef = useRef<HTMLDivElement>(null);
+  const artistRef = useRef<HTMLParagraphElement>(null);
   const fxBtnRef = useRef<HTMLButtonElement>(null); // 音效面板锚点（面板中心对此按钮居中）
 
   // 切歌重置
-  useEffect(() => { setLyrics(null); }, [currentSong?.id]);
+  useEffect(() => { setLyrics(null); setLinkOn(null); setMelodyOn(false); }, [currentSong?.id]);
 
   // 全屏加载歌词
   useEffect(() => {
@@ -144,8 +173,10 @@ export function PlayerBar() {
         const idx = lyricsCache.lines.findLastIndex(l => l.time <= timeRef.current);
         const cur = lyricsCache?.lines[idx] || null;
         const nxt = lyricsCache && idx >= 0 && idx < lyricsCache.lines.length - 1 ? lyricsCache.lines[idx + 1] : null;
+        // 再往后一句：滚动动画需要它在下方已经渲染好，才能"滑上来"而不是"跳出来"
+        const nxt2 = lyricsCache && idx >= 0 && idx < lyricsCache.lines.length - 2 ? lyricsCache.lines[idx + 2] : null;
         if (isElectron) {
-          (window as any).electronAPI.lyricUpdate({ text: cur?.text || '♪', next: nxt?.text || '' });
+          (window as any).electronAPI.lyricUpdate({ idx, text: cur?.text || '♪', next: nxt?.text || '', next2: nxt2?.text || '' });
           // ⚡ 只在配置真正变化时才发送 IPC（避免每 400ms 触发歌词窗口样式重算）
           const cfgStr = JSON.stringify(readPipCfg());
           if (cfgStr !== cachedCfg) {
@@ -166,6 +197,12 @@ export function PlayerBar() {
 
 
 
+  useEffect(() => {
+    const onLock = (e: Event) => setPipLockedState(!!(e as CustomEvent).detail);
+    window.addEventListener('haizhe-pip-lock', onLock);
+    return () => window.removeEventListener('haizhe-pip-lock', onLock);
+  }, []);
+
   const togglePip = async () => {
     if (pipOn) {
       setPipOn(false);
@@ -178,6 +215,8 @@ export function PlayerBar() {
       if (ea) {
         ea.lyricShow();
         ea.lyricConfig(readPipCfg());
+        // 窗口是复用的，重新打开时再同步一次锁定状态（必须在下发 config 之后）
+        ea.lyricLock?.(localStorage.getItem('haizhe-pip-lock') === '1');
         setPipOn(true);
       } else {
         const w = await pipOpen();
@@ -199,7 +238,7 @@ export function PlayerBar() {
 
   // 底栏圆形图标按钮通用样式
   const iconBtn = 'w-9 h-9 rounded-full flex items-center justify-center transition-colors';
-  const iconBtnIdle = 'text-white/45 hover:text-white hover:bg-white/10';
+  const iconBtnIdle = 'text-white/45 hover:text-white hover:bg-[var(--skin-glow-soft)]';
 
   if (!currentSong) {
 
@@ -233,6 +272,26 @@ export function PlayerBar() {
       {/* Bottom bar */}
       <div className="h-18 glass shrink-0 px-4 flex items-center gap-4 relative max-md:h-14 max-md:gap-2 max-md:px-2">
         {fxOn && <FxPanel onClose={() => setFxOn(false)} anchorRef={fxBtnRef} />}
+        {melodyOn && (
+          <MelodyPanel
+            songId={currentSong.id}
+            songTitle={`${currentSong.title} · ${currentSong.artist}`}
+            onClose={() => setMelodyOn(false)}
+            anchorRef={melodyBtnRef}
+          />
+        )}
+        {linkOn && (
+          <RelinkPanel
+            scope={linkOn}
+            ident={linkOn === 'artist' ? currentSong.artist : currentSong.id}
+            title={linkOn === 'artist'
+              ? currentSong.artist
+              : `${currentSong.title} · ${currentSong.artist}`}
+            artistName={currentSong.artist}
+            onClose={() => setLinkOn(null)}
+            anchorRef={linkOn === 'artist' ? artistRef : titleRef}
+          />
+        )}
         <div className="absolute top-0 left-0 right-0 -translate-y-1/2 px-0 z-10">
           <input type="range" min={0} max={100} value={pct} onChange={onProgress} className="progress-bar w-full"
             style={{ backgroundImage: `linear-gradient(to right, var(--accent) ${pct}%, rgba(255,255,255,0.06) ${pct}%)` }} />
@@ -241,8 +300,22 @@ export function PlayerBar() {
         <div className="flex items-center gap-3 min-w-[180px] max-w-[260px] max-md:min-w-[100px] max-md:max-w-[140px]">
           <CoverThumbnail songId={currentSong.id} size={42} eager />
           <div className="min-w-0 max-md:hidden">
-            <p className="text-sm font-medium truncate">{currentSong.title}</p>
-            <p className="text-xs text-white/30 truncate">{currentSong.artist}</p>
+            <p ref={titleRef}
+              onDoubleClick={() => setLinkOn(v => (v === 'song' ? null : 'song'))}
+              title="双击搜索这首歌的现场版 / 翻唱 / MV"
+              className="text-sm font-medium truncate cursor-pointer select-none hover:text-[var(--accent)] transition-colors">
+              {currentSong.title}
+            </p>
+            <p ref={artistRef}
+              onDoubleClick={e => {
+                e.stopPropagation();
+                if (!currentSong.artist) return;
+                setLinkOn(v => (v === 'artist' ? null : 'artist'));
+              }}
+              title="双击查看这位歌手的现场 / 翻唱 / MV"
+              className="text-xs text-white/30 truncate cursor-pointer select-none hover:text-white/60 transition-colors">
+              {currentSong.artist}
+            </p>
           </div>
         </div>
 
@@ -255,7 +328,7 @@ export function PlayerBar() {
               <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg>
             </button>
             <button onClick={() => dispatch({ type: 'TOGGLE_PLAY' })} title="播放/暂停"
-              className="w-11 h-11 rounded-full bg-white flex items-center justify-center hover:scale-105 transition-transform shadow-lg max-md:w-9 max-md:h-9">
+              className="main-play w-11 h-11 rounded-full bg-white flex items-center justify-center hover:scale-105 transition-transform shadow-lg max-md:w-9 max-md:h-9">
               {isPlaying
                 ? <svg width="18" height="18" viewBox="0 0 24 24" fill="black"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
                 : <svg width="18" height="18" viewBox="0 0 24 24" fill="black" style={{ marginLeft: 1 }}><path d="M8 5v14l11-7z"/></svg>
@@ -268,9 +341,24 @@ export function PlayerBar() {
               className={`${iconBtn} text-sm ${fs ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : iconBtnIdle} max-md:w-8 max-md:h-8`}>
               词
             </button>
-            <button onClick={togglePip} title="桌面歌词"
-              className={`${iconBtn} text-[13px] ${pipOn ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : iconBtnIdle} max-md:w-8 max-md:h-8 max-md:text-xs`}>
+            <button onClick={togglePip}
+              title={pipLocked ? '桌面歌词（点击关闭）· 点右上角 🔒 解锁' : '桌面歌词'}
+              className={`${iconBtn} text-[13px] relative ${pipOn ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : iconBtnIdle} max-md:w-8 max-md:h-8 max-md:text-xs`}>
               桌词
+              {/* 角标本身就是解锁键：点掉它 → 锁定解除；再点同一位置就落在按钮上 = 关闭 */}
+              {pipLocked && (
+                <span role="button" tabIndex={0}
+                  onClick={e => { e.stopPropagation(); setPipLocked(false); }}
+                  onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); setPipLocked(false); } }}
+                  title="解锁桌面歌词"
+                  className="absolute -top-1 -right-1 w-[15px] h-[15px] rounded-full flex items-center justify-center
+                             text-[8px] leading-none cursor-pointer select-none
+                             bg-[var(--skin-surface,rgba(15,15,26,0.95))]
+                             border border-[var(--skin-border,rgba(255,255,255,0.25))]
+                             hover:scale-110 hover:border-[var(--accent)] transition-transform">
+                  🔒
+                </span>
+              )}
             </button>
             <button ref={fxBtnRef} onClick={() => setFxOn(v => !v)} title="音效（倍速/升降KEY/音轨）"
               className={`${iconBtn} text-[13px] relative ${
@@ -280,6 +368,11 @@ export function PlayerBar() {
               {state.stem !== 'original' && (
                 <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-[var(--accent)]" />
               )}
+            </button>
+            <button ref={melodyBtnRef} onClick={() => setMelodyOn(v => !v)} title="旋律（音高走向）"
+              className={`${iconBtn} text-[13px] max-md:w-8 max-md:h-8 max-md:text-xs ${
+                melodyOn ? 'bg-[var(--accent)]/20 text-[var(--accent)]' : iconBtnIdle}`}>
+              旋律
             </button>
           </div>
           <div className="flex items-center gap-2 text-xs text-white/20 max-md:hidden">

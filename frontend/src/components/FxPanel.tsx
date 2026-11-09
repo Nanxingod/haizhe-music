@@ -3,6 +3,7 @@
 
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from 'react';
 import type { CSSProperties, RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import { usePlayer } from '../store';
 import { api } from '../api';
 import type { Stem, StemStatus, StemQuality } from '../types';
@@ -35,7 +36,8 @@ export function FxPanel({ onClose, anchorRef }: {
       const r = btn.getBoundingClientRect();
       const cx = r.left + r.width / 2;
       const left = Math.max(8, Math.min(cx - w / 2, window.innerWidth - w - 8));
-      setPos({ left: Math.round(left), right: 'auto' });
+      // portal 到 body 后是相对视口的 fixed：底边贴锚点上方 10px
+      setPos({ left: Math.round(left), bottom: Math.round(window.innerHeight - r.top + 10) });
     };
     update();
     window.addEventListener('resize', update);
@@ -118,7 +120,7 @@ export function FxPanel({ onClose, anchorRef }: {
 
   return (
     <div ref={panelRef} style={pos ?? undefined}
-      className="absolute bottom-16 right-4 z-50 w-[440px] max-md:w-[calc(100vw-1rem)] max-md:right-2 rounded-2xl glass p-6 text-white shadow-2xl border border-white/10 animate-[fi_0.15s]">
+      className="fixed right-4 z-[9999] w-[440px] max-md:w-[calc(100vw-1rem)] max-md:right-2 rounded-2xl glass-panel p-6 text-white animate-[fi_0.15s]">
       <style>{'@keyframes fi{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}'}</style>
 
       {/* 标题 */}
@@ -248,4 +250,6 @@ export function FxPanel({ onClose, anchorRef }: {
       )}
     </div>
   );
+
+  return createPortal(panel, document.body);
 }

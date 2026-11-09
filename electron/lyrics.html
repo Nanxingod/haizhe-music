@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
+  :root {
+    --fs: 22px;          /* 当前行字号 */
+    --fit: 1;            /* 超长句时整体缩放系数（1 = 不缩） */
+    --rowH: 34px;        /* 每行固定高度 */
+    --pip-color: #ff9eaf;
+    --pip-bg: rgba(0,0,0,0.75);
+    --pip-border: rgba(255,255,255,0.08);
+    --pip-glow: rgba(255,158,175,0.28);
+  }
   html, body {
     width:100%; height:100vh; overflow:hidden;
     background:transparent;
@@ -14,49 +23,305 @@
     user-select:none;
   }
   #lyrics {
-    display:flex; flex-direction:column; align-items:center;
-    gap:4px; padding:8px 20px;
-    border-radius:12px;
-    transition: all 0.3s ease;
+    position: relative;
+    padding:8px 20px;
+    border-radius:14px;
+    background-color: var(--pip-bg);
+    border: 1px solid var(--pip-border);
+    box-shadow: 0 12px 32px -12px rgba(0,0,0,.55);
+    transition: background-color .3s ease, border-color .3s ease, width .28s ease;
+    max-width: calc(100vw - 12px);
   }
-  #cur {
-    font-weight:600; font-size:22px;
-    color: #ff9eaf;
-    text-shadow: 0 0 10px #ff9eaf44;
+  /* 视口只露出 2 行：当前行 + 下一句 */
+  #wrap {
+    height: calc(var(--rowH) * 2);
+    overflow: hidden;
+    position: relative;
+    -webkit-mask-image: linear-gradient(180deg, #000 84%, transparent 100%);
+    mask-image: linear-gradient(180deg, #000 84%, transparent 100%);
   }
-  #next {
-    font-size:18px; opacity:0.40;
-    color: #ff9eaf;
+  /* 舞台整体上下平移；每一行按"歌词行号"绝对定位，内容永不搬家 */
+  #stage {
+    position: absolute; left: 0; right: 0; top: 0;
+    transition: transform .46s cubic-bezier(.25,.8,.35,1);
+    will-change: transform;
+  }
+  /* 下一句小字号、当前句大字号；字号变化随滑动一起过渡。
+     ⚠️ 之所以现在能这么做：每行内容永远待在自己的行号元素里（不搬家），
+     所以是"同一行自己在长大"，不是"两行互换字号"。
+     ⚠️ font-weight 必须统一：它不在过渡列表里，会瞬间跳变导致字宽骤变。 */
+  .row {
+    position: absolute; left: 0; right: 0;
+    height: var(--rowH);
+    display:flex; align-items:center; justify-content:center;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    font-size: calc(var(--fs) * 0.76 * var(--fit));
+    font-weight: 500;
+    color: var(--pip-color);
+    opacity:.32;
+    transition: font-size .46s cubic-bezier(.25,.8,.35,1),
+                opacity .46s ease, text-shadow .46s ease;
+  }
+  /* 右上角热区：只有鼠标进到这一小块才显示锁，别处划过不出现 */
+  #hot {
+    position: absolute; top:0; right:0;
+    width:32px; height:24px;
+    display:flex; align-items:flex-start; justify-content:flex-end;
+    padding:3px 5px 0 0;
+    /* 热区本身保持可拖动，只有锁按钮 no-drag（否则右上角拖不动窗口） */
+  }
+  #lock {
+    width:18px; height:18px; border:0; border-radius:5px;
+    background:transparent; color: var(--pip-color);
+    font-size:10px; line-height:1; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+    opacity:0; pointer-events:none;
+    -webkit-app-region: no-drag;
+    transition: opacity .15s ease, background .15s ease;
+  }
+  /* 未锁：只有鼠标进热区才淡入，可点 */
+  #hot:hover #lock { opacity:.6; pointer-events:auto; }
+  #lock:hover { opacity:1; background: rgba(255,255,255,.14); }
+  /* 已锁：hover 不算数（窗口本就鼠标穿透），要靠主进程轮询 3 秒后加 .hint。
+     ⚠️ 必须写 :not(.hint)：否则这条 hover 规则的权重高于 .hint 那条，
+     解锁键一显示、鼠标移上去就正好命中它 → 立刻消失（离开又出现），根本点不到。 */
+  body.locked:not(.hint) #hot:hover #lock { opacity:0; pointer-events:none; }
+  body.locked.hint #lock,
+  body.locked.hint #hot:hover #lock { opacity:.95; pointer-events:auto; }
+  body.locked { -webkit-app-region: no-drag; }
+
+  .row.on {
+    font-size: calc(var(--fs) * var(--fit));
+    opacity:1;
+    text-shadow: 0 0 12px var(--pip-glow), 0 0 2px var(--pip-glow);
   }
 </style>
 </head>
 <body>
 <div id="lyrics">
-  <span id="cur">♫ 等待播放...</span>
-  <span id="next"></span>
+  <div id="hot" aria-hidden="false"><button id="lock" title="锁定">🔒</button></div>
+  <div id="wrap">
+    <div id="stage"></div>
+  </div>
 </div>
 <script>
 const { ipcRenderer } = require('electron');
 
-ipcRenderer.on('lyric-data', (_e, data) => {
-  document.getElementById('cur').textContent = data.text || '♪';
-  document.getElementById('next').textContent = data.next || '';
+const stage = document.getElementById('stage');
+const wrap = document.getElementById('wrap');
+const root = document.documentElement;
+const lyricBox = document.getElementById('lyrics');
+
+// ───────────────────────────────────────────────────────────────
+// 关键设计：每一行由"歌词行号"决定它的固定纵向位置（top = idx * rowH），
+// 内容写进去之后就再也不搬家。换句时只平移 #stage。
+//
+// ⚠️ 之前两版都把内容在几个固定元素之间搬来搬去（先把 r2 改成新当前行、
+// 或换句后重排 4 行），结果就是"大字号那一格突然换成别的内容再缩回去"，
+// 看起来像放大又缩小。内容不搬家，样式只跟着行号变，就不会有这个问题。
+// ───────────────────────────────────────────────────────────────
+
+const slots = new Map();   // 行号 -> 元素
+let curIdx = null;         // 当前演唱到的行号
+let rowH = 34;
+
+function readRowH() {
+  const v = parseFloat(getComputedStyle(root).getPropertyValue('--rowH'));
+  return Number.isFinite(v) && v > 0 ? v : 34;
+}
+
+function slot(i) {
+  let el = slots.get(i);
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'row';
+    el.dataset.i = String(i);          // 便于排查"内容是否搬到了别的元素"
+    el.style.top = (i * rowH) + 'px';
+    stage.appendChild(el);
+    slots.set(i, el);
+  }
+  return el;
+}
+
+/** 行高变了（改字号）：所有行重新贴一次位置，再重新对齐舞台 */
+function layout() {
+  rowH = readRowH();
+  for (const [i, el] of slots) el.style.top = (i * rowH) + 'px';
+  stage.style.transition = 'none';
+  stage.style.transform = `translateY(${-(curIdx ?? 0) * rowH}px)`;
+  void stage.offsetHeight;
+  stage.style.transition = 'transform .46s cubic-bezier(.25,.8,.35,1)';
+}
+
+// 行改成绝对定位后不再撑开父容器，盒子宽度会塌成 0 —— 这里按可见文字量宽度。
+const meas = document.createElement('span');
+meas.style.cssText = 'position:absolute;left:-9999px;top:0;white-space:nowrap;visibility:hidden;';
+document.body.appendChild(meas);
+
+let lastFit = 1;
+let lastBoxW = 0;
+
+function fitWidth() {
+  // 一律按"大字号"量：小字号那句迟早会变成大字号，按实测算宽会导致变大的瞬间盒子变宽
+  const fsCss = getComputedStyle(root).getPropertyValue('--fs').trim() || '22px';
+  let w = 0;
+  for (const [i, el] of slots) {
+    if (i !== curIdx && i !== curIdx + 1) continue;
+    if (!el.textContent) continue;
+    const cs = getComputedStyle(el);
+    meas.style.fontFamily = cs.fontFamily;
+    meas.style.fontSize = fsCss;
+    meas.style.fontWeight = cs.fontWeight;
+    meas.textContent = el.textContent;
+    w = Math.max(w, meas.offsetWidth);
+  }
+
+  // 上限按屏幕算（不能用 window.innerWidth：窗口会随内容变宽，会自我反馈）
+  const SCREEN_MAX = Math.min((window.screen && screen.availWidth ? screen.availWidth : 1200) - 24, 1400);
+  // 超长句：窗口先撑到屏幕宽；还放不下就整体缩字号（保留大小字号比例）
+  // ⚠️ 内边距（46）不参与缩放：只缩文字，否则盒子会比文字还窄、反而被截断
+  const PAD = 46;
+  const slack = SCREEN_MAX - PAD;                 // 留给文字的最大宽度
+  const fit = w > slack ? Math.max(0.45, slack / w) : 1;
+  const boxW = Math.max(150, Math.min(SCREEN_MAX, Math.round(w * fit) + PAD));
+
+  if (fit !== lastFit) {
+    lastFit = fit;
+    root.style.setProperty('--fit', String(fit));
+    const fsPx = parseFloat(fsCss) || 22;
+    root.style.setProperty('--rowH', Math.round(fsPx * 1.5 * fit) + 'px');
+    layout();                                     // 行高变了，重新贴位置
+  }
+  if (boxW !== lastBoxW) {
+    lastBoxW = boxW;
+    lyricBox.style.width = boxW + 'px';
+    ipcRenderer.send('lyric-resize-w', boxW + 12); // 留一点投影余量
+  }
+}
+
+// 内容实际需要多高 → 通知主进程调整窗口（固定 80px 会裁掉第二行）
+let lastH = 0;
+function reportSize() {
+  requestAnimationFrame(() => {
+    const h = Math.ceil(lyricBox.getBoundingClientRect().height) + 4;
+    if (h && Math.abs(h - lastH) >= 2) { lastH = h; ipcRenderer.send('lyric-resize', h); }
+  });
+}
+
+function apply(idx, text, next, next2) {
+  // 1) 内容写进各自行号对应的元素里（写一次就不再动）
+  if (idx >= 0) {
+    // 开始唱之后，"等待播放"那一行要清掉，否则它会压在第 0 行下面
+    const waiting = slots.get(-1);
+    if (waiting) { waiting.remove(); slots.delete(-1); }
+    const cur = slot(idx);
+    if (cur.textContent !== text) cur.textContent = text;
+    if (next) { const e = slot(idx + 1); if (e.textContent !== next) e.textContent = next; }
+    if (next2) { const e = slot(idx + 2); if (e.textContent !== next2) e.textContent = next2; }
+  } else {
+    // 还没唱到第一句（切歌后 idx 会回到 -1，顺手把上一首的行清干净）
+    if ([...slots.keys()].some(i => i >= 0)) {
+      for (const [i, el] of slots) { if (i >= 0) { el.remove(); slots.delete(i); } }
+    }
+    let e = slots.get(-1);
+    if (!e) { e = document.createElement('div'); e.className = 'row'; e.style.top = '0px'; stage.appendChild(e); slots.set(-1, e); }
+    if (e.textContent !== text) e.textContent = text;
+  }
+
+  // 2) 只把"当前行号"那一行点亮
+  for (const [i, el] of slots) el.classList.toggle('on', i === idx);
+
+  // 3) 平移舞台，让当前行落到视口顶部
+  const target = -(idx < 0 ? 0 : idx) * rowH;
+  if (curIdx !== idx) {
+    // 相邻句才滑动；拖动进度条跳很远时直接落位，否则会划过一长串歌词
+    const far = curIdx !== null && Math.abs(idx - curIdx) > 2;
+    stage.style.transition = far ? 'none' : 'transform .46s cubic-bezier(.25,.8,.35,1)';
+    stage.style.transform = `translateY(${target}px)`;
+    if (far) { void stage.offsetHeight; stage.style.transition = 'transform .46s cubic-bezier(.25,.8,.35,1)'; }
+  }
+  curIdx = idx;
+
+  prune();
+  fitWidth();
+  reportSize();
+}
+
+/** 离当前位置太远的行删掉，避免长歌堆积几百个节点 */
+function prune() {
+  if (curIdx === null) return;
+  for (const [i, el] of slots) {
+    if (Math.abs(i - curIdx) > 12) { el.remove(); slots.delete(i); }
+  }
+}
+
+// ── 锁定 / 解锁 ──
+// 未锁：鼠标移上来显示 🔒，点一下锁住。
+// 已锁：窗口鼠标穿透、收不到 hover —— 由主进程轮询光标，停在右上角 3 秒后
+//       临时放开穿透并推 lyric-lock-hint，这时按钮变成 🔓 可点。
+let lockedState = false;
+
+function setLockUI(locked) {
+  lockedState = !!locked;
+  document.body.classList.toggle('locked', lockedState);
+  if (!lockedState) document.body.classList.remove('hint');
+  const btn = document.getElementById('lock');
+  btn.textContent = lockedState ? '🔓' : '🔒';
+  btn.title = lockedState ? '解锁' : '锁定（锁定后鼠标穿透）';
+}
+
+document.getElementById('lock').addEventListener('click', () => {
+  ipcRenderer.send('lyric-lock', !lockedState);
 });
 
+ipcRenderer.on('lyric-lock', (_e, locked) => setLockUI(locked));
+ipcRenderer.on('lyric-lock-hint', (_e, show) => {
+  document.body.classList.toggle('hint', !!show);
+});
+
+ipcRenderer.on('lyric-data', (_e, d) => {
+  const idx = typeof d.idx === 'number' ? d.idx : -1;
+  apply(idx, d.text || '♪', d.next || '', d.next2 || '');
+});
+
+// 皮肤点缀贴图（与主窗口同一套内联 SVG：海洋=气泡+浪花+小鱼，森林=枝叶+光点）
+const DECOR = {
+  ocean: "url(\"data:image/svg+xml;charset=utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='170' viewBox='0 0 260 170'><g fill='none' stroke='%237fd8f5' stroke-linecap='round'><circle cx='214' cy='42' r='10' stroke-opacity='.20'/><circle cx='230' cy='20' r='4.5' stroke-opacity='.16'/><circle cx='192' cy='22' r='3' stroke-opacity='.14'/><path d='M-10 138 q28 -13 56 0 t56 0 t56 0 t56 0 t56 0' stroke-opacity='.20' stroke-width='1.6'/><path d='M-10 154 q28 -11 56 0 t56 0 t56 0 t56 0 t56 0' stroke-opacity='.11' stroke-width='1.2'/></g><g fill='%237fd8f5'><path d='M150 106 q17 -9 34 0 q-17 9 -34 0z' fill-opacity='.17'/><path d='M150 106 l-12 -7.5 v15z' fill-opacity='.17'/><circle cx='138' cy='94' r='2' fill-opacity='.18'/><circle cx='129' cy='83' r='1.4' fill-opacity='.14'/></g></svg>\")",
+  forest: "url(\"data:image/svg+xml;charset=utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='170' viewBox='0 0 260 170'><g fill='none' stroke='%23a8e08a' stroke-linecap='round'><path d='M238 174 q-16 -48 12 -76' stroke-opacity='.20' stroke-width='1.7'/><path d='M208 176 q7 -35 -13 -56' stroke-opacity='.14' stroke-width='1.3'/></g><g fill='%23a8e08a'><ellipse cx='243' cy='118' rx='11.5' ry='5.5' fill-opacity='.17' transform='rotate(-38 243 118)'/><ellipse cx='230' cy='138' rx='9' ry='4.5' fill-opacity='.13' transform='rotate(-58 230 138)'/><ellipse cx='209' cy='112' rx='9.5' ry='4.6' fill-opacity='.15' transform='rotate(24 209 112)'/><circle cx='216' cy='84' r='2.2' fill-opacity='.22'/><circle cx='234' cy='70' r='1.6' fill-opacity='.18'/></g></svg>\")",
+};
+
 ipcRenderer.on('lyric-config', (_e, cfg) => {
-  const box = document.getElementById('lyrics');
-  if (cfg.bgDark !== undefined) box.style.background = `rgba(0,0,0,${cfg.bgDark})`;
+  if (cfg.bgDark !== undefined) {
+    root.style.setProperty('--pip-bg', `rgba(0,0,0,${cfg.bgDark})`);
+  }
   if (cfg.color) {
-    document.getElementById('cur').style.color = cfg.color;
-    document.getElementById('next').style.color = cfg.color;
-    document.getElementById('cur').style.textShadow = `0 0 10px ${cfg.color}44`;
+    root.style.setProperty('--pip-color', cfg.color);
+    root.style.setProperty('--pip-glow', cfg.color + '48');
   }
   if (cfg.fontSize) {
-    document.getElementById('cur').style.fontSize = cfg.fontSize + 'px';
-    document.getElementById('next').style.fontSize = Math.round(cfg.fontSize * 0.8) + 'px';
+    root.style.setProperty('--fs', cfg.fontSize + 'px');
+    root.style.setProperty('--rowH', Math.round(cfg.fontSize * 1.5) + 'px');
+    layout();
+    fitWidth();
+    reportSize();
   }
   if (cfg.fontFamily) document.body.style.fontFamily = cfg.fontFamily;
+  if (cfg.skin) {
+    const dec = cfg.skin.name ? DECOR[cfg.skin.name] : null;
+    lyricBox.style.backgroundImage = dec || 'none';
+    lyricBox.style.backgroundRepeat = 'no-repeat';
+    lyricBox.style.backgroundPosition = 'right -6px bottom -4px';
+    lyricBox.style.backgroundSize = '150px auto';
+    if (cfg.skin.surface) root.style.setProperty('--pip-bg', cfg.skin.surface);
+    if (cfg.skin.border) root.style.setProperty('--pip-border', cfg.skin.border);
+    if (cfg.skin.accent) {
+      root.style.setProperty('--pip-color', cfg.skin.accent);
+      root.style.setProperty('--pip-glow', cfg.skin.accent + '48');
+    }
+  }
 });
+
+rowH = readRowH();
 </script>
 </body>
 </html>

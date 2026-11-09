@@ -15,6 +15,9 @@ from scanner import scan_all, search_songs, get_songs_by_artist, COVER_CACHE_DIR
 from lyrics import parse_lrc
 from models import Song, Artist
 import separator as stems_mod
+import relinks as relink_mod
+import artist_info as artist_mod
+import melody as melody_mod
 
 app = FastAPI(title="小海蜇音乐播放器", version="2.2.0")
 
@@ -303,14 +306,25 @@ async def get_status():
 
 @app.get("/api/config")
 async def get_config():
-    return {"music_dir": str(scanner.MUSIC_DIR)}
+    # 只回 key 的「有没有配」，绝不回明文
+    return {"music_dir": str(scanner.MUSIC_DIR), "relink": relink_mod.status()}
 
 
 @app.post("/api/config")
 def set_config(body: dict):
-    """切换音乐目录：校验 → 写 config.json → 清缓存 → 全量重扫。
+    """两件事共用：切换音乐目录 / 保存检索 key。
     同步 def（FastAPI 自动放线程池），冷扫描 7-14s 期间不阻塞事件循环（流媒体照常）。"""
     global ALL_SONGS, ARTISTS
+
+    # ① 检索 key（可能和 music_dir 一起提交，也可能单独提交）
+    if "deepseek_api_key" in body or "tavily_api_key" in body:
+        st = relink_mod.save_keys(body.get("deepseek_api_key"), body.get("tavily_api_key"))
+        relink_mod.clear_cache()          # key 变了，之前的排序结果作废
+        if not str(body.get("music_dir") or "").strip():
+            return {"music_dir": str(scanner.MUSIC_DIR), "relink": st,
+                    "songs": len(ALL_SONGS), "artists": len(ARTISTS)}
+
+    # ② 切换音乐目录
     new_dir = str(body.get("music_dir") or "").strip()
     if not new_dir:
         raise HTTPException(400, "music_dir 不能为空")
@@ -320,8 +334,55 @@ def set_config(body: dict):
     ALL_SONGS, ARTISTS = scan_all()
     # 切换目录后同样执行老目录命名迁移并重建 stems 索引
     stems_mod.migrate_legacy({s.id: s.file_path for s in ALL_SONGS})
+    # 曲库变了 → 相关视频的磁盘索引/内存缓存全部作废（磁盘文件留在原曲库目录里）
+    relink_mod.clear_cache()
+    artist_mod.clear_cache()
+    melody_mod.clear_cache()
     print(f"[Config] 音乐目录已切换: {msg}，共 {len(ALL_SONGS)} 首")
-    return {"music_dir": msg, "songs": len(ALL_SONGS), "artists": len(ARTISTS)}
+    return {"music_dir": msg, "songs": len(ALL_SONGS), "artists": len(ARTISTS),
+            "relink": relink_mod.status()}
+
+
+# --- 相关视频推荐（V13，AI 检索现场版/翻唱）---
+
+@app.get("/api/relinks/{song_id}")
+def get_relinks(song_id: str, refresh: int = Query(default=0)):
+    """两段式：首屏约 1-2 秒返回 B站结果（pending=true），
+    抖音 + AI 排序在后台补齐，前端轮询本接口直到 pending=false。
+    同步 def → FastAPI 放线程池，不阻塞流媒体。"""
+    song = next((s for s in ALL_SONGS if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "歌曲不存在")
+    return relink_mod.get_result(song_id, song.title, song.artist,
+                                 filepath=song.file_path, force=bool(refresh))
+
+
+@app.get("/api/melody/{song_id}")
+def get_melody(song_id: str, refresh: int = Query(default=0)):
+    """旋律：人声轨 → CREPE/pyin → 音符 + 按歌词句分组。
+    首次约 20 秒（GPU），结果落盘到 <音乐目录>/旋律/，之后秒开。"""
+    song = next((s for s in ALL_SONGS if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "歌曲不存在")
+    return melody_mod.get(song_id, song.file_path, song.title,
+                          song.lrc_path, force=bool(refresh))
+
+
+@app.get("/api/artist-relinks")
+def get_artist_relinks(name: str = Query(..., min_length=1),
+                       refresh: int = Query(default=0)):
+    """歌手维度的相关视频（现场/翻唱/MV），逻辑与歌曲检索一致但缓存在 <相关视频>/歌手/。
+    单独一条路径是为了不和 /api/relinks/{song_id} 的路径参数冲突。"""
+    nm = name.strip()
+    return relink_mod.get_result(nm, nm, nm, force=bool(refresh), scope="artist")
+
+
+# --- 歌手简介（V13.5，网易云公开接口，免费无需 key）---
+
+@app.get("/api/artist-info")
+def get_artist_info(name: str = Query(..., min_length=1), refresh: int = Query(default=0)):
+    """同步 def → 线程池；简介结果会落盘到 <音乐目录>/歌手简介/。"""
+    return artist_mod.get_info(name, force=bool(refresh))
 
 
 # --- 人声/伴奏分离（V12，依赖可选：pip install audio-separator）---
@@ -397,6 +458,8 @@ async def setup_gc_timer():
     asyncio.create_task(periodic_gc())
     # GPU 预检测放后台线程：torch 导入耗时 1-2s，避免首次打开效果面板时阻塞请求
     threading.Thread(target=stems_mod.has_gpu, daemon=True).start()
+    # 相关视频：预热 B站 连接（首次 DNS/TLS 1-2s，别让第一次双击歌名白等）
+    threading.Thread(target=relink_mod.warmup, daemon=True).start()
 
 
 if __name__ == "__main__":

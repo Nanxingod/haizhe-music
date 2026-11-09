@@ -1,10 +1,12 @@
 // 设置页 - 背景DIY + 字体DIY + 人声分离缓存管理
 
 import { useState, useEffect, useCallback, memo } from 'react';
-import { api } from '../api';
+import { api, API_BASE } from '../api';
 import { usePlayer } from '../store';
-import type { StemItem } from '../types';
+import type { StemItem, RelinkConfig } from '../types';
 import { applyBgStyle, type BgAdjust } from '../App';
+import { SKINS, applySkin, currentSkin, type SkinId } from '../skin';
+import { isPipLocked, setPipLocked } from '../pipLock';
 
 type BgArea = 'main' | 'sidebar' | 'player';
 
@@ -67,6 +69,14 @@ export const SettingsPage = memo(function SettingsPage() {
     catch { return DEFAULTS; }
   });
   const [dim, setDim] = useState<DimConfig>(loadDimConfig);
+  const [skin, setSkin] = useState<SkinId>(() => currentSkin());
+  const [pipLocked, setPipLockedState] = useState(isPipLocked);
+  // 桌词窗口里点的锁也要反映到这个开关上
+  useEffect(() => {
+    const onLock = (e: Event) => setPipLockedState(!!(e as CustomEvent).detail);
+    window.addEventListener('haizhe-pip-lock', onLock);
+    return () => window.removeEventListener('haizhe-pip-lock', onLock);
+  }, []);
   const [imageLists, setImageLists] = useState<Record<BgArea, BgItem[]>>({ main: [], sidebar: [], player: [] });
   const [uploading, setUploading] = useState<Record<BgArea, boolean>>({ main: false, sidebar: false, player: false });
   const [uiFont, setUiFont] = useState(() => localStorage.getItem('haizhe-font-ui') || 'noto-sans');
@@ -85,19 +95,64 @@ export const SettingsPage = memo(function SettingsPage() {
   const [dirInput, setDirInput] = useState('');
   const [dirBusy, setDirBusy] = useState(false); // 保存中（含重扫）
   const [dirMsg, setDirMsg] = useState('');
+  // AI 接口密钥（相关视频检索用）
+  const [relinkCfg, setRelinkCfg] = useState<RelinkConfig | null>(null);
+  const [dsKey, setDsKey] = useState('');
+  const [tvKey, setTvKey] = useState('');
+  const [keyBusy, setKeyBusy] = useState(false);
+  const [keyMsg, setKeyMsg] = useState('');
 
   useEffect(() => {
-    fetch('/api/config').then(r => r.json())
-      .then((c: { music_dir: string }) => { setMusicDir(c.music_dir); setDirInput(c.music_dir); })
+    fetch(`${API_BASE}/api/config`).then(r => r.json())
+      .then((c: { music_dir: string; relink?: RelinkConfig }) => {
+        setMusicDir(c.music_dir);
+        setDirInput(c.music_dir);
+        setRelinkCfg(c.relink ?? { deepseek: false, tavily: false });
+      })
       .catch(() => {});
   }, []);
+
+  /** 保存 AI 接口密钥（只提交填了的那一项，留空表示不动） */
+  const saveKeys = async () => {
+    if (keyBusy) return;
+    if (!dsKey.trim() && !tvKey.trim()) { setKeyMsg('先填一个 key 再保存'); return; }
+    setKeyBusy(true); setKeyMsg('');
+    try {
+      const r = await api.saveRelinkKeys({
+        ...(dsKey.trim() ? { deepseek_api_key: dsKey.trim() } : {}),
+        ...(tvKey.trim() ? { tavily_api_key: tvKey.trim() } : {}),
+      });
+      setRelinkCfg(r.relink ?? null);
+      setDsKey(''); setTvKey('');
+      setKeyMsg('已保存。下次双击歌名时生效（旧的规则版缓存会自动重搜）');
+    } catch (e) {
+      setKeyMsg(`失败：${(e as Error).message}`);
+    } finally {
+      setKeyBusy(false);
+    }
+  };
+
+  /** 清除已保存的 key */
+  const clearKey = async (which: 'deepseek_api_key' | 'tavily_api_key') => {
+    if (keyBusy) return;
+    setKeyBusy(true); setKeyMsg('');
+    try {
+      const r = await api.saveRelinkKeys({ [which]: '' });
+      setRelinkCfg(r.relink ?? null);
+      setKeyMsg('已清除');
+    } catch (e) {
+      setKeyMsg(`失败：${(e as Error).message}`);
+    } finally {
+      setKeyBusy(false);
+    }
+  };
 
   const saveMusicDir = async (dir: string) => {
     const d = dir.trim();
     if (!d || d === musicDir || dirBusy) return;
     setDirBusy(true); setDirMsg('');
     try {
-      const res = await fetch('/api/config', {
+      const res = await fetch(`${API_BASE}/api/config`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ music_dir: d }),
       });
@@ -146,7 +201,7 @@ export const SettingsPage = memo(function SettingsPage() {
   // 加载文件夹图片
   useEffect(() => {
     (['main', 'sidebar', 'player'] as BgArea[]).forEach(area => {
-      fetch(`/api/bg-images/${area}`).then(r => r.json())
+      fetch(`${API_BASE}/api/bg-images/${area}`).then(r => r.json())
         .then(list => setImageLists(prev => ({ ...prev, [area]: list }))).catch(() => {});
     });
   }, []);
@@ -177,7 +232,7 @@ export const SettingsPage = memo(function SettingsPage() {
 
   // 重新拉取某区域的图片列表
   const reloadImages = useCallback((area: BgArea) => {
-    fetch(`/api/bg-images/${area}`).then(r => r.json())
+    fetch(`${API_BASE}/api/bg-images/${area}`).then(r => r.json())
       .then((list: BgItem[]) => setImageLists(prev => ({ ...prev, [area]: list }))).catch(() => {});
   }, []);
 
@@ -187,7 +242,7 @@ export const SettingsPage = memo(function SettingsPage() {
     if (!file) return;
     setUploading(prev => ({ ...prev, [area]: true }));
     try {
-      const res = await fetch(`/api/bg-images/${area}?name=${encodeURIComponent(file.name)}`, {
+      const res = await fetch(`${API_BASE}/api/bg-images/${area}?name=${encodeURIComponent(file.name)}`, {
         method: 'POST',
         body: file,
       });
@@ -205,7 +260,7 @@ export const SettingsPage = memo(function SettingsPage() {
   const handleDeleteBg = async (area: BgArea, item: BgItem) => {
     if (!item.custom || !item.file) return;
     if (!confirm(`删除自定义背景"${item.name}"？`)) return;
-    const ok = await fetch(`/api/bg-images/${area}/${encodeURIComponent(item.file)}`, { method: 'DELETE' })
+    const ok = await fetch(`${API_BASE}/api/bg-images/${area}/${encodeURIComponent(item.file)}`, { method: 'DELETE' })
       .then(r => r.ok).catch(() => false);
     if (ok) {
       // 若删除的是当前使用的背景，回落到默认
@@ -278,8 +333,107 @@ export const SettingsPage = memo(function SettingsPage() {
           </div>
           {dirMsg && <p className={`text-xs ${dirMsg.startsWith('失败') ? 'text-red-300/70' : 'text-[var(--accent)]/80'}`}>{dirMsg}</p>}
           <p className="text-xs text-white/25 leading-relaxed">
-            切换后立即重新扫描。人声分离结果保存在音乐目录下的「人声分离」文件夹，随曲库一起备份/迁移。
+            切换后立即重新扫描。人声分离结果保存在音乐目录下的「人声分离」文件夹，
+            相关视频搜索结果保存在「相关视频」文件夹，歌手简介缓存在「歌手简介」文件夹，
+            都会随曲库一起备份/迁移。
           </p>
+        </section>
+
+        {/* ═══ AI 接口密钥 ═══ */}
+        <section className="glass-light rounded-2xl p-5 space-y-3">
+          <h2 className="text-lg font-semibold">🔑 AI 接口密钥<span className="text-white/25 text-sm font-normal ml-2">可选</span></h2>
+          <p className="text-xs text-white/25 leading-relaxed">
+            双击底栏歌名搜「现场版 / 翻唱 / MV」时用。<b className="text-white/40">填 DeepSeek 一个就够</b>：
+            它同时负责 AI 归类短评和抖音搜索（DeepSeek Search）。Tavily 是可选的抖音备用通道。
+            都不填也能用，只是降级成「只搜 B站 + 规则排序」。
+          </p>
+
+          {/* DeepSeek */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${relinkCfg?.deepseek ? 'bg-[var(--accent)]' : 'bg-white/20'}`} />
+              <span className="text-sm text-white/60 w-24 shrink-0">DeepSeek</span>
+              <input
+                type="password" value={dsKey} onChange={e => setDsKey(e.target.value)}
+                placeholder={relinkCfg?.deepseek ? '已配置（重新填写可覆盖）' : 'sk-...'}
+                className="flex-1 bg-black/30 backdrop-blur-md border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-white/20 outline-none focus:border-[var(--accent)] transition-colors"
+              />
+              {relinkCfg?.deepseek && (
+                <button onClick={() => clearKey('deepseek_api_key')} disabled={keyBusy}
+                  className="px-3 py-2 rounded-xl text-xs text-white/35 hover:bg-white/10 hover:text-white/70 transition-colors disabled:opacity-40 shrink-0">
+                  清除
+                </button>
+              )}
+            </div>
+            <p className="text-[11px] text-white/20 pl-5">规划搜索词 + 归类打分写短评 + 抖音搜索（DeepSeek Search，约 ¥5/千次）</p>
+          </div>
+
+          {/* Tavily */}
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${relinkCfg?.tavily ? 'bg-[var(--accent)]' : 'bg-white/20'}`} />
+              <span className="text-sm text-white/60 w-24 shrink-0">Tavily</span>
+              <input
+                type="password" value={tvKey} onChange={e => setTvKey(e.target.value)}
+                placeholder={relinkCfg?.tavily ? '已配置（重新填写可覆盖）' : 'tvly-...'}
+                className="flex-1 bg-black/30 backdrop-blur-md border border-white/10 rounded-xl px-3 py-2 text-sm text-white placeholder-white/20 outline-none focus:border-[var(--accent)] transition-colors"
+              />
+              {relinkCfg?.tavily && (
+                <button onClick={() => clearKey('tavily_api_key')} disabled={keyBusy}
+                  className="px-3 py-2 rounded-xl text-xs text-white/35 hover:bg-white/10 hover:text-white/70 transition-colors disabled:opacity-40 shrink-0">
+                  清除
+                </button>
+              )}
+            </div>
+            <p className="text-[11px] text-white/20 pl-5">可选。抖音的备用通道（主通道是 DeepSeek Search，国内直连更快）</p>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <button onClick={saveKeys} disabled={keyBusy || (!dsKey.trim() && !tvKey.trim())}
+              className="px-4 py-2 rounded-xl text-sm bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors disabled:opacity-40">
+              {keyBusy ? '保存中…' : '保存密钥'}
+            </button>
+            {keyMsg && (
+              <span className={`text-xs ${keyMsg.startsWith('失败') ? 'text-red-300/70' : 'text-[var(--accent)]/80'}`}>{keyMsg}</span>
+            )}
+          </div>
+
+          <p className="text-[11px] text-white/20 leading-relaxed">
+            密钥只写在本机 <code className="text-white/35">backend/config.json</code>（已被 .gitignore 排除，不会进版本库）。
+            接口只回「有没有配」，不会把 key 回传给前端。
+          </p>
+        </section>
+
+        {/* ═══ 皮肤 ═══ */}
+        <section className="space-y-3">
+          <h2 className="text-lg font-semibold">🎨 皮肤</h2>
+          <p className="text-xs text-white/25 leading-relaxed">
+            皮肤会同时改变主题色、弹层底色、按钮与选中态，不只是背景图。
+            桌面歌词的颜色也会跟着变（改完重开一次悬浮窗即可）。
+          </p>
+          <div className="grid grid-cols-3 gap-3 max-md:grid-cols-1">
+            {SKINS.map(sk => {
+              const on = skin === sk.id;
+              return (
+                <button key={sk.id}
+                  onClick={() => { applySkin(sk.id); setSkin(sk.id); }}
+                  className={`text-left rounded-xl p-3 border transition-all ${
+                    on ? 'border-[var(--accent)]/60 bg-white/8 ring-1 ring-[var(--accent)]/25'
+                       : 'border-white/10 hover:bg-white/5'}`}>
+                  <div className="flex h-11 rounded-lg overflow-hidden mb-2.5">
+                    {sk.swatch.map((c, i) => (
+                      <span key={i} className="flex-1" style={{ background: c }} />
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm">{sk.name}</span>
+                    {on && <span className="text-[10px] text-[var(--accent)]">使用中</span>}
+                  </div>
+                  <p className="text-[11px] text-white/30 mt-0.5">{sk.desc}</p>
+                </button>
+              );
+            })}
+          </div>
         </section>
 
         {/* ═══ 背景图 ═══ */}
@@ -433,6 +587,22 @@ export const SettingsPage = memo(function SettingsPage() {
               style={{ color: pipColor, fontSize: pipSize + 'px', fontFamily: FONT_OPTIONS.find(f => f.id === lyricsFont)?.css, textShadow: `0 0 10px ${pipColor}44` }}>
               预览效果 Preview
             </p>
+          </div>
+
+          {/* 锁定 */}
+          <div className="flex items-center justify-between gap-3 pt-1 border-t border-white/8">
+            <div className="min-w-0">
+              <p className="text-xs text-white/55">锁定悬浮窗（鼠标穿透）</p>
+              <p className="text-[11px] text-white/25 leading-relaxed mt-0.5">
+                锁定后窗口不再响应鼠标，也不会被拖动——防止误触。
+                锁定状态下只能回到这里解锁。
+              </p>
+            </div>
+            <button
+              onClick={() => { const v = !pipLocked; setPipLockedState(v); setPipLocked(v); }}
+              className={`shrink-0 w-11 h-6 rounded-full relative transition-colors ${pipLocked ? 'bg-[var(--accent)]/70' : 'bg-white/12'}`}>
+              <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${pipLocked ? 'left-[22px]' : 'left-0.5'}`} />
+            </button>
           </div>
 
           <p className="text-xs text-white/20">修改后需重新开启悬浮窗生效。歌词字体跟随上方「歌词字体」设置。</p>

@@ -12,7 +12,7 @@
 |------|------|
 | [0. 阅读指南](#0-阅读指南) | 代码规模、阅读顺序、命名约定 |
 | [1. 整体架构与启动链路](#1-整体架构与启动链路) | 三进程模型、端口、一次启动发生了什么 |
-| [2. 后端 FastAPI](#2-后端-fastapi) | main / scanner / lyrics / models / separator / setup_stem_models |
+| [2. 后端 FastAPI](#2-后端-fastapi) | main / scanner / lyrics / models / separator / relinks / artist_info / setup_stem_models |
 | [3. 音效引擎 fx.ts](#3-音效引擎-fxts) | 两层架构、音质保护四条铁律 |
 | [4. 前端状态机 store.tsx](#4-前端状态机-storetsx) | reducer、副作用、切歌时序、四道防线 |
 | [5. 前端组件与页面](#5-前端组件与页面) | 组件树、FxPanel、背景与字体系统 |
@@ -393,6 +393,318 @@ PyInstaller 打包配置，把后端编成独立 `haizhe-backend.exe`（目标�
 
 ---
 
+### 2.7 `backend/relinks.py` —— 相关视频检索（V13）
+
+双击底栏歌名时，给这首歌找「现场版 / 优质翻唱」的外链。三个来源各解决一个不同的问题。
+
+**两段式与"关窗不中断"**：`/api/relinks/{id}` 只负责首屏，补齐跑在
+`_finish()` 的 daemon 线程里，**与 HTTP 请求/前端轮询无关**——关掉面板线程照样跑完。
+首屏 `_assemble()` 之后立刻 `_disk_write(..., partial=True)` 落一份，补齐完成再用
+`partial=False` 覆盖；`get_result()` 读到 `partial` 的缓存时会
+`pending=True` + `_resume()` 续跑（`_jobs` 里已有任务则不重复排）。
+所以"中途退出"最多损失一次补齐，B站结果不会丢。
+
+**两个维度（scope）**
+
+| scope | ident | 查询词来源 | 接口 | 落盘 |
+|---|---|---|---|---|
+| `song`（默认） | `song_id` | 歌名 + 歌手 | `/api/relinks/{id}` | `<相关视频>/<原文件名>.json` |
+| `artist` | 歌手名 | 只要歌手名 | `/api/artist-relinks?name=` | `<相关视频>/歌手/<歌手名>.json` |
+
+`get_result(ident, title, artist, filepath, force, scope)` 一个入口吃两种维度，
+差异只在这几处：`_rule_queries()` / `plan_queries()` 的查询词、`label_ai()` 的提示词头部、
+`_pre_rank()` 的匹配词（歌名 or 歌手名）、以及落盘目录。
+
+**缓存 key 必须带 scope 前缀**（`f"{scope}:{ident}"`）：歌名和歌手名很可能同名
+（比如一首歌就叫《周杰伦》），不带前缀会互相覆盖。磁盘目录也分开了，
+`_rebuild_disk_index()` 会分别扫 `相关视频/` 和 `相关视频/歌手/`。
+
+**为什么是三个来源，不能一个搞定**
+
+| 需求 | 现实 | 对策 |
+|---|---|---|
+| B站视频链接 | `search/type` 被风控返回 HTML；`search/all/v2` 免登录可用 | 直接调 `search/all/v2`，拿 `bvid` 拼 `bilibili.com/video/BVxxx` |
+| 抖音视频链接 | 官方接口要登录（`status_code 2483`）；网页是纯前端壳；搜索引擎 302 | **DeepSeek Search**（`/v1/tools/search` + `site:douyin.com`），Tavily 作备用 |
+| 分类 + 打分 + 短评 | 关键词规则只能粗略归类 | **DeepSeek**（`deepseek-flash`）一次性给全部候选打标 |
+
+**两段式返回（这是本模块最重要的一点）**
+
+```
+get_result() 第一次调用
+  ├─ 同步（~1s）：规则查询词 → B站三路（现场/翻唱/MV）→ 规则打分 → 返回 pending=true
+  └─ 后台线程（~15s）：DeepSeek 规划搜索词 → B站补一轮 + 抖音双查询 → DeepSeek 归类 → 落盘
+```
+
+前端每 2 秒轮询同一接口，`pending=false` 就停。这样做的原因是实测耗时分布：
+
+| 阶段 | 耗时 |
+|---|---|
+| B站单查询 | 0.5–0.8s |
+| DeepSeek 规划搜索词 | 0.6–2s |
+| Tavily 抖音单查询 | **5–10s（偶发 SSL 握手超时）** |
+| DeepSeek 归类 16 条候选 | 6–9s |
+
+全都串在首屏就是 15 秒白屏，用户会以为点坏了。所以：
+
+- **AI 规划搜索词挪到后台**——首屏用规则词（`歌名 歌手 现场` / `歌名 歌手 翻唱`）已经够用
+- **抖音只走后台**——它是最慢的一环
+- 30 分钟缓存（`_full_cache` / `_fast_cache` 两份，`clear_cache()` 供改 key 时清空）
+
+**候选配额（踩过的坑）**
+
+```python
+BILI_KEEP = 10          # B站固定保底
+DOUYIN_KEEP = 6         # 抖音固定上限
+cands = bili[:10] + dy[:6]
+```
+
+最初写成 `bili[:MAX - len(dy)]`，结果抖音两个查询回来十几条时，B站配额被压到 4 条，
+再经 AI 归类一筛，**现场版/翻唱里全是抖音，B站被挤没了**——正好违背"B站优先"的要求。
+固定配额才稳。
+
+**排序规则**
+
+```python
+for key in ["live", "cover", "mv", "other"]:      # 一级：现场 → 翻唱 → MV → 其他
+    for src in ["bilibili", "douyin"]:            # 二级：B站 → 抖音
+        picked += sorted(同组同源, key=score, reverse=True)[:PER_SRC_LIMIT]
+picked = picked[:GROUP_MAX.get(key, 99)]          # MV 只留 1 条
+```
+
+另外「其他相关」有分数门槛（`score >= 50`），现场/翻唱放宽到 30，用来滤掉抖音返回的
+无关片段（实测会把"周杰伦歌词见面那天"这类塞进来，AI 给 8 分，直接丢掉）。
+
+**降级路径（三层）**
+
+| 缺什么 | 影响 | 代码位置 |
+|---|---|---|
+| 没 Tavily key | 抖音结果为空，只显示 B站 | `search_douyin()` 直接 return `[]` |
+| 没 DeepSeek key | 规则归类 + 播放量打分，`blurb` 为空，`ai=false` | `label_ai()` 开头 return |
+| 接口超时/报错 | 该来源返回空列表，不影响其它来源 | 每个 provider 各自 try/except |
+
+关键设计：**规则版永远先跑一遍**（`label_rule()`），AI 只是在它基础上复核。这样即使 AI 只
+回来一半结果，另一半也有合理的分类和分数，不会出现空值。
+
+**重试与兜底（都是踩坑后加的）**
+
+- `search_douyin`：Tavily 偶发 SSL 握手超时，重试 1 次
+- `label_ai`：DeepSeek 走系统代理，实测偶发 `Tunnel connection failed: 502`，
+  重试 3 次、每次间隔 0.8s×n；三次都失败才退规则版，并在 `notes` 里说明
+- **hint 兜底**：每条搜索结果带 `hint`（来自 live/cover/mv 哪条查询）。AI 挂了时，
+  抖音那种只有 `#演唱会现场##live` 标签、没有"现场/翻唱"字样的条目不会掉进 other 被门槛滤掉
+- **`_pre_rank` 候选粗排**：`歌名命中 +40 / 现场翻唱MV关键词 +20 / log10(播放量)×7`。
+  只按播放量排会出事——实测《Mojito》时百万播放的"周杰伦串烧合集"挤掉了真正的演唱会片段
+- **`_refine_cat` 归类校正**：AI 判完再按强关键词纠一次（同时含"现场"和"翻唱" → 归 cover）。
+  AI 曾把"周杰伦本人演唱会现场"判成 other 打低分，导致现场版里一条 B站 都不剩
+
+**网络韧性（这台机器上踩出来的，都是实测数据）**
+
+| 现象 | 实测 | 对策 |
+|---|---|---|
+| 走 `HTTP_PROXY` 请求 B站 | **7.7s**（直连 0.5s，15 倍差距） | B站 请求用 `ProxyHandler({})` 直连，失败再回退代理 |
+| 走代理请求 DeepSeek | 0.3–1.4s，但偶发 `Tunnel connection failed: 502` | 重试（归类 3 次 / 搜索 2 次） |
+| B站 单次延迟抖动 | 1.6s / 3.6s / **25.6s** / 1.6s / 9.5s | **总预算制**：首屏 8s、补齐 12s，超时用已返回结果 |
+| 归类 JSON 畸形 | `Expecting ',' delimiter`（模型偶发在字符串里塞引号） | `_salvage_items()` 用正则逐条抢救，抢救够多就继续用 |
+
+总预算靠 `futures_wait(futs, timeout=SEARCH_BUDGET_FULL)` + `ex.shutdown(wait=False)` 实现。
+**不能用 `with ThreadPoolExecutor()`**——它的退出会 `shutdown(wait=True)`，等所有慢请求跑完，
+预算等于没用。
+
+**播放量权重要给足**
+
+`_rule_score` 的播放量档位从「1M +30」提到「5M +40 / 1M +34 / 300k +27」；`_pre_rank` 的
+log 系数从 5 提到 7。AI 提示词也明确写了权重：相关性 40% / 热度 35% / 音质画质 25%，
+并给播放量档位参考。群众的播放量是最稳的质量信号（B站 能拿到，抖音拿不到）。
+
+**前端轮询不能一次失败就放弃**
+
+`RelinkPanel` 早期版本在一次 `fetch` 失败后就停止轮询并显示"搜索失败：Failed to fetch"。
+实际现场是 Vite 代理短暂中断（见 §6.4），后端并无问题。现在：连续失败退避重试 4 次
+（1.2/2.4/3.6/4.8s），每次请求带 25s `AbortController` 超时，界面上区分
+「自动重试中」（琥珀色）与「已失败 + 重试按钮」（红色）。
+
+**key 存哪**
+
+`backend/config.json` 的 `deepseek_api_key` / `tavily_api_key`，也支持环境变量
+`DEEPSEEK_API_KEY` / `TAVILY_API_KEY`。config.json 已被 `.gitignore` 排除。
+**入口在「设置 → 🔑 AI 接口密钥」**（`SettingsPage.tsx`），这样任何拿到这份代码的人
+都能填自己的 key，而不是只有作者能跑。
+`GET /api/config` **只回布尔值** `{"relink":{"deepseek":true,"tavily":false}}`，绝不回明文。
+
+**三级缓存（因为搜索真实花钱）**
+
+| 层 | 位置 | 容量 | 失效 |
+|---|---|---|---|
+| 任务态 | `_jobs`（内存） | 最多 4 个并发任务 | 任务结束即删 |
+| 内存 LRU | `_mem`（OrderedDict） | **6 条** | 30 分钟 TTL / 被挤出 |
+| 磁盘 | `<音乐目录>/相关视频/<原文件名>.json` | 不限 | **不自动过期**，靠刷新按钮 |
+
+```python
+_mem[song_id] = dict(data, _ts=time.time())
+while len(_mem) > MEM_MAX:
+    _mem.popitem(last=False)        # 淘汰最久未用的
+```
+
+早期版本只有一个永不过期的内存 dict，搜 200 首就积 200 份完整结果，重启还全丢——现在
+内存只做"最近 6 首"的加速，真正的持久层是磁盘。首屏那份 `fast` 只挂在 `_jobs` 里，
+`_finish` 的 `finally` 里 `_jobs.pop()` 顺手释放。
+
+磁盘记录里存了 `caps`（当时有没有 key）：
+
+```json
+{ "version": 1, "song": {...}, "ai": true,
+  "caps": {"deepseek": true, "tavily": true},
+  "fetched_at": 1793310000, "total": 7, "groups": [...] }
+```
+
+读盘时若发现"当时没 key、现在有了"，判定为能力升级 → `return None` 触发重搜，
+避免拿旧的规则版结果糊弄用户。`DISK_VERSION` 用于以后结构变更时整体作废旧缓存。
+
+**`effort: "low"` 是实测结论**
+
+DeepSeek V4 的 `deepseek-flash` 默认 `effort=high`。同一批 17 条候选分类：
+
+| effort | 耗时 | completion_tokens |
+|---|---|---|
+| default(high) | 11.6s | 812 |
+| **low** | **4.8s** | 851 |
+
+分类任务本身简单，low 的产出质量看不出差别，所以 `_chat()` 固定传 `effort="low"`。
+
+**B站结果播放量门槛**
+
+```python
+MIN_BILI_PLAY = 2000          # 低于这个播放量直接丢（随手拍/低质搬运太多）
+def _min_bili_play():         # config.json 的 min_bili_play 可覆盖
+```
+
+在 `search_bilibili()` 里逐条过滤。副作用要清楚：**冷门歌可能全被滤空**，所以
+`_assemble()` 在结果为 0 时会带一条提示说明当前阈值，避免用户以为功能坏了。
+
+---
+
+### 2.8 `backend/artist_info.py` —— 歌手简介（V13.5）
+
+**选源结论**（都实测过）：
+
+| 来源 | 结论 |
+|---|---|
+| **网易云** `api/v1/artist/<id>` | ✅ 免费、无需 key、国内直连、中文 `briefDesc` 头部歌手 600+ 字 |
+| 维基百科 REST | ❌ 数据干净但国内直连不通（无代理必失败） |
+| MusicBrainz | ❌ 免费但要英文名，中文歌手简介基本为空 |
+| 百度百科 | ❌ 无官方 API，抓 HTML 会被反爬拦 |
+
+**两步接口**
+
+```
+api/search/get?s=<歌手>&type=100&limit=5   → artist id / picUrl / fansSize
+api/v1/artist/<id>                        → briefDesc / alias / musicSize / albumSize
+```
+
+注意：`/api/artist/<id>`（不带 v1）的 `briefDesc` 是空的，**必须用 `/api/v1/artist/<id>`**；
+`/api/artist/desc?id=` 直接返回 `{"code":400,"msg":"参数错误"}`。这三个接口长得像，别用错。
+
+**简介质量校验（必须做）**
+
+`briefDesc` 是歌手/编辑自己填的。实测：
+
+- 周杰伦 665 字、Beyond 685 字 —— 正常
+- 万能青年旅店 76 字 —— 短但可用
+- **陈粒是 `ok…………………………`** —— 纯垃圾
+
+所以 `_clean_brief()` 三道闸：长度 < 10 → 丢；中文字符 < 5 → 丢；字符种类 ≤ 6 → 丢。
+判为无效后 `brief` 返回空字符串，前端显示「暂无简介」，不会把垃圾文本摆出来。
+
+**缓存**
+
+按歌手名直接命名文件（`<音乐目录>/歌手简介/<歌手>.json`），**不需要索引**——
+key 本身就是歌手名，这点比 relinks 简单（那边 key 是 song_id，落盘名是歌曲文件名，才需要建索引）。
+简介几乎不变，所以磁盘不自动过期；查不到的只做 10 分钟内存负缓存，不落盘。
+
+内存 LRU 只留 8 条，与 relinks 同样的考虑：不长期吃内存。
+
+---
+
+### 2.9 `backend/melody.py` —— 旋律提取（V14）
+
+**核心结论：必须用人声轨。** 实测在《晴天》混音上跑 pyin，中位音高 82Hz —— 那是贝斯，
+不是人声；和 vocals 轨的一致率只有 37%。所以本模块只读
+`separator.stems_path(song_id, "vocals")`，没分离过直接返回 `no_vocals`。
+
+| 检测器 | 4:48 的歌 | 备注 |
+|---|---|---|
+| **CREPE**（torchcrepe） | **23s**（RTX GPU） | 主力，`return_periodicity=True` 拿置信度 |
+| librosa.pyin | 140s | 兜底，无 torch 时用 |
+
+两个坑：
+
+1. 这个版本的 `torchcrepe.predict()` **没有 `verbose` 参数**，而且默认
+   **只返回 pitch 一个值**，要置信度必须显式 `return_periodicity=True`。
+2. `torchcrepe/load.py` 顶部 `import torchaudio`（只用于读文件）。我们的音频走
+   librosa 解码，所以在模块里塞一个最小 stub 占住 `sys.modules['torchaudio']`，
+   免得为了这一行 import 装 100MB 的 torchaudio。
+
+**曲线 → 音符**：f0 → MIDI（`69 + 12*log2(f/440)`）→ 量化到半音 → 同音粘连
+（间隔 <100ms 合并，气口不该把一句话切碎）→ 丢 <70ms 短音 → `_drop_octave_outliers()`
+清掉"短音且和周围 1 秒中位音高差 ≥10 个半音"的倍频误判。
+
+**按句对齐**：LRC 是逐行时间戳，所以每行取 `[本行起点, 下一行起点)` 区间内的音符。
+要做到全民K歌那种逐字高亮，需要强制对齐（WhisperX/MFA），成本高一个量级，暂不做。
+
+缓存 `<音乐目录>/旋律/<原文件名>.json`（只存音符，不存原始 f0 曲线——后者一首歌
+两万多个浮点，没必要）。
+
+---
+
+### 2.10 皮肤与桌面歌词（V14.5）
+
+**皮肤 = 一组 CSS 变量**，挂在 `<html data-skin>` 上（`frontend/src/skin.ts` 管理，存 localStorage）。
+关键点：**不要为了皮肤去改组件**。项目里按钮/进度条/选中态早就在用 `var(--accent)`，
+所以只要在各皮肤块里覆盖 `--accent` / `--skin-surface` / `--skin-border` / `--skin-ribbon`，
+它们就一起变了。
+
+桌面歌词是独立 html 窗口，读不到主窗口的 CSS 变量 → `PlayerBar.readPipSkin()` 把
+`--accent` / `--skin-surface` 算成具体色值，随 `lyric-config` 一起 IPC 过去。
+
+**桌面歌词锁定**：`lyric-lock` IPC → `win.setIgnoreMouseEvents(true, { forward: true })`
+（forward 让鼠标事件穿透到桌面而不是被吞掉），同时给窗口发 `lyric-lock` 让它把
+`-webkit-app-region` 从 drag 改成 no-drag。锁住后窗口点不到，所以解锁入口只放设置页；
+`createLyricWindow()` 的 `did-finish-load` 里会重新 `applyLyricLock()`，重建窗口不丢状态。
+
+**锁定状态的三处同步**：`frontend/src/pipLock.ts` 是唯一入口——写 localStorage +
+`lyricLock()` 通知主进程 + 广播 `haizhe-pip-lock` 自定义事件；
+桌词窗口里点的锁由主进程用 `lyric-lock-state` 回推给主窗口（否则主窗口的解锁条永远不出现）。
+
+**锁定时为什么收不到 hover**：`setIgnoreMouseEvents(true, {forward:true})` 让事件整体穿透，
+网页侧收不到任何鼠标事件。所以"悬停 3 秒出解锁键"由**主进程每 200ms 轮询
+`screen.getCursorScreenPoint()`** 实现：
+- 光标在**整个窗口矩形**内连续停留 `DWELL_MS=3000` → 临时 `setIgnoreMouseEvents(false)`
+  + 推 `lyric-lock-hint` 显示 🔓；
+- 移出窗口后给 `GRACE_MS=4000` 宽限再收回穿透（否则手一抖移出就点不到，体验很差）。
+
+⚠️ 别把判定做成"右上角小块热区"：窗口是自适应的，热区很难对准，
+而且手动去找那 44×30 的过程中会频繁进出判定区，表现为"悬停没反应、离开才出现"。
+
+**桌词宽度自适应**：`fitWidth()` 用隐藏 span 按"大字号"量当前行+下一行，取最大值。
+上限取 `screen.availWidth`（**不能用 `window.innerWidth`**——窗口会随内容变宽，形成反馈循环）。
+放不下时按 `slack = SCREEN_MAX - PAD` 算缩放系数，写进 `--fit`，行字号统一乘它。
+⚠️ 内边距**不能**参与缩放，否则盒子比文字还窄，反而会截断（踩过）。
+宽度变化通过 `lyric-resize-w` 通知主进程，以中心为锚左右扩。
+
+**桌面歌词的滚动**：原来是直接改 `textContent`，换句瞬间闪一下。现在改成三行舞台
+（prev / cur / next）+ `translateY` 动画：
+
+```
+#stage { transform: translateY(-1 * rowH) }   /* 静止时第 2 行在顶部 */
+换句 → translateY(-2 * rowH)（整列上滑一格，新行同时变亮）
+430ms 后：内容整体上移一格 + 瞬時复位 translateY(-1 * rowH)，视觉无跳变
+```
+
+要点：**行高必须是固定值**（`--rowH`），字号变化只影响行内文字，不影响行高，
+否则动画过程中高度变化会抖。`busy` 标志防止快速换句时动画打架（只保留最后一次）。
+
+---
+
 ## 3. 音效引擎 `frontend/src/fx.ts`
 
 V12 的核心新增。157 行，自洽且无外部状态，可以独立理解。
@@ -636,14 +948,49 @@ const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
 
 **UI 与状态的关系**：面板本身不持有音效状态，全部 `dispatch` 到 store，由 store 的 effect 应用到引擎。这样"从别处改了倍速"面板也会同步。
 
-### 5.3 `components/PlayerBar.tsx`（~600 行）
+### 5.3 `components/RelinkPanel.tsx`（~250 行）
+
+双击底栏歌名弹出。结构与 `FxPanel` 同源（锚定 + 外部点击关闭），但多了两件事：
+
+**① 自己的 pending 轮询**
+
+```typescript
+const tick = async () => {
+  const r = await api.getRelinks(songId);
+  setData(r);
+  if (r.pending && tries < 12) {   // 最多 12 轮 ≈ 24s
+    tries += 1;
+    timer = setTimeout(tick, 2000);
+  }
+};
+```
+
+和后端两段式配套：先渲染 B站结果，抖音/AI 补齐后自动替换。`aliveRef` 防止面板关闭后回调写状态。
+
+**② 外链跳转的降级**
+
+```typescript
+async function openLink(url: string) {
+  const ea = (window as any).electronAPI;
+  if (ea?.openExternal) { if (await ea.openExternal(url)) return; }
+  window.open(url, '_blank', 'noopener,noreferrer');   // 网页版
+}
+```
+
+Electron 侧 `ipcMain.handle('open-external')` 会用 `shell.openExternal`，并**只放行 http/https**
+（`new URL()` 校验协议），防止 `file://` 或自定义协议被拼进来。
+
+**布局**：`absolute bottom-16` + `useLayoutEffect` 算 left（对齐歌名块、clamp 在视口内），
+内容区 `max-h-[58vh] overflow-y-auto`。与 FxPanel 的差异是它左对齐锚点、宽度 460px。
+
+### 5.4 `components/PlayerBar.tsx`（~600 行）
 
 最复杂的组件：底部播放栏 + 全屏歌词 + PiP + 效果按钮。
 
 - `state.playbackRate !== 1 || pitchSemitones !== 0 || chipmunk || stem !== 'original'` → "效果"按钮高亮，提示当前有音效在生效
 - 全屏封面的 cleanup：`coverRef.current.src = ''`，配合 `key` 强制卸载释放 Chromium 解码位图
 
-### 5.4 背景与字体系统
+### 5.5 背景与字体系统
 
 **背景（`App.tsx` + `SettingsPage.tsx`）**
 
@@ -665,7 +1012,7 @@ localStorage：`haizhe-bg`（图）、`haizhe-dim`（调整参数，旧格式纯
 
 8 款中文字体，三类独立配置（界面 / 标题 / 歌词），通过 CSS 变量 `--font-ui` / `--font-heading` / `--font-lyrics` 注入，立即生效。localStorage 键：`haizhe-font-{ui,heading,lyrics}`。
 
-### 5.5 `pages/SettingsPage.tsx`（~25KB，最大的文件）
+### 5.6 `pages/SettingsPage.tsx`（~25KB，最大的文件）
 
 三块：音乐目录（`/api/config` + Electron 目录选择）、背景（上传/删除/调整）、字体；另有桌面歌词预览。
 
@@ -723,6 +1070,78 @@ IPC 链路：`React → ipcRenderer.send('lyric-update') → main.js → lyricWi
 配置同步：用户改设置 → localStorage → 主进程 500ms tick 比对缓存 → 仅变化时才发 `lyric-config` IPC。
 
 > V10 修过一个 bug：IPC 消息在歌词窗口加载完成前到达会被丢弃 → 加 `lyricReady` 标志位 + 暂存 `pendingLyricCfg`。
+
+### 6.4 子进程日志与自愈（V13.1，一次真实故障倒逼出来的）
+
+**故障现象**：应用开着，界面还在，但音乐不播、双击歌名显示「搜索失败：Failed to fetch」。
+
+**根因**：`startFrontend()` spawn 的 Vite 进程没了。前端所有 `/api` 请求都走 Vite proxy
+（`frontend/src/api.ts` 用相对路径 + `vite.config.ts` 的 proxy），代理一死 →
+渲染进程全部请求失败、`<audio>` 拉不到流。**后端 8765 一直是健康的**。
+
+**为什么当时查不出来**：两个子进程都是 `stdio: 'ignore'`，Electron 又是无窗口启动，
+`console.error` 没有落点，`desktop.log` 里只有 Python 的 DeprecationWarning。零线索。
+
+**现在的做法**：
+
+```javascript
+// 日志：每次启动重建 logs/backend.log、logs/frontend.log
+openLogs();
+backendProc  = spawn('python', ['main.py'], { stdio: childStdio(backendLog),  ... });
+frontendProc = spawn('node',   [viteJs, ...],  { stdio: childStdio(frontendLog), ... });
+
+// 自愈：非主动退出 → 最多重启 3 次；活过 60 秒重置计数
+if (quitting) return;                                  // cleanup() 里先置 true
+if (Date.now() - startedAt > 60000) frontendRestarts = 0;
+setTimeout(() => { if (!quitting) startFrontend(); }, 2000);
+```
+
+两个细节：
+
+- **`quitting` 必须在 `killProcTree()` 之前置位**，否则退出应用时 taskkill 触发的 `exit`
+  会把子进程又拉起来
+- **重启要计上限**：端口被占用（`EADDRINUSE`）会立刻退出，不设上限就是无限刷
+
+**配套改动：桌面端不再依赖 Vite proxy**
+
+```typescript
+// frontend/src/api.ts
+const isElectron = typeof window !== 'undefined' && !!(window as any).electronAPI;
+export const API_BASE = isElectron ? 'http://127.0.0.1:8765' : '';
+```
+
+
+页面在 Electron 里本来就跑在本机，直连后端最稳：Vite 再挂，播放与搜索照常。
+网页版（含手机同 WiFi 访问）仍用相对路径，必须靠 proxy。
+注意 `SettingsPage` / `RelinkPanel` 里的裸 `fetch('/api/...')` 也要用 `API_BASE` 拼，
+否则只改 `api.ts` 是半套。
+
+**另一个坑：GUI 启动时 PATH 和终端不一样**
+
+双击快捷方式启动的 Electron 继承的是 explorer 的 PATH，`python` 可能解析到
+**没装 fastapi 的那个解释器**（本机实测：PATH 上的 `python` 是 3.13.14，没有 fastapi；
+`D:\Anaconda\python.exe` 是 3.9.13，才有 fastapi 和 mutagen）。
+`spawn('python')` 因此会在启动瞬间失败，而旧代码 `stdio:'ignore'` 下一点痕迹都没有，
+用户看到的就是**黑屏**。
+
+现在 `pickPython()` 按优先级探测（Anaconda 优先，最后才退回 PATH），并把结果写进日志：
+
+```
+[env] python = Python 3.9.13  (D:\Anaconda\python.exe)
+[spawn] pid=12345 exe=D:\Anaconda\python.exe cwd=...\backend
+```
+
+另外 `did-fail-load` 重试 5 次仍失败时，会加载一张说明页（而不是留一片黑屏），
+直接告诉你去看哪两个日志文件。
+
+**排查同类问题的最短路径**：
+
+```bash
+netstat -ano | grep -E ":(8765|5173)\s+.*LISTENING"     # 谁在谁不在
+curl -s -m5 http://127.0.0.1:8765/api/status            # 直连后端，绕过 Vite
+curl -s -r 0-1023 -o /dev/null -w "%{http_code}\n" \
+     http://127.0.0.1:8765/api/stream/<song_id>         # 流媒体是否真能出字节
+```
 
 ---
 
@@ -890,6 +1309,9 @@ __fxEngine.debug
 | `backend/main.py` | 413 | FastAPI 服务、全部 HTTP 接口 |
 | `backend/scanner.py` | 280 | 扫描 / ID3 / 封面缓存 / 多歌手拆分 |
 | `backend/separator.py` | 348 | 人声分离任务与结果管理 |
+| `backend/relinks.py` | ~430 | 相关视频检索（B站/抖音/AI 排序，两段式） |
+| `backend/artist_info.py` | ~200 | 歌手简介（网易云接口 + 质量校验 + 落盘缓存） |
+| `backend/melody.py` | ~250 | 旋律提取（人声轨 → CREPE/pyin → 音符 → 按句切分） |
 | `backend/setup_stem_models.py` | ~500 | HQ 模型下载 + PoPE 补丁 |
 | `backend/lyrics.py` | ~50 | LRC 解析 |
 | `backend/models.py` | ~30 | Pydantic 模型 |
@@ -897,6 +1319,7 @@ __fxEngine.debug
 | `frontend/src/components/PlayerBar.tsx` | ~600 | 播放栏 + 全屏歌词 + PiP |
 | `frontend/src/pages/SettingsPage.tsx` | ~700 | 设置（最大文件） |
 | `frontend/src/components/FxPanel.tsx` | 251 | 音效面板 |
+| `frontend/src/components/RelinkPanel.tsx` | ~250 | 相关视频面板（双击歌名触发，自带 pending 轮询） |
 | `frontend/src/fx.ts` | 157 | 音效引擎 |
 | `frontend/src/api.ts` | 58 | API 客户端 |
 | `frontend/src/types.ts` | 60 | 类型定义 |

@@ -9,6 +9,7 @@
   --accent: #ff6b8a;
   --accent-dim: #c0396b;
   --accent-glow: rgba(255, 107, 138, 0.3);
+  --skin-glow-soft: rgba(255, 255, 255, 0.10);   /* 默认皮肤的按键 hover 雾 */
   --text-primary: #f0f0f5;
   --text-secondary: #9d9db5;
   --text-tertiary: #5c5c7a;
@@ -136,6 +137,87 @@ body::after {
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border: 1px solid rgba(255,255,255,0.04);
+}
+
+/* ═══════════ 皮肤 ═══════════
+   皮肤 = 一组 CSS 变量。因为按钮/进度条/选中态都在用 var(--accent)，
+   换皮肤时它们会一起变，不是只换背景图。
+   新增皮肤：加一个 html[data-skin="xxx"] 块即可。 */
+html[data-skin="ocean"] {
+  --accent: #57c8f2;
+  --accent-dim: #2b8fb8;
+  --accent-glow: rgba(87, 200, 242, 0.32);
+  --skin-surface: rgba(7, 32, 46, 0.93);
+  --skin-panel-2: rgba(4, 18, 28, 0.95);
+  --skin-border: rgba(110, 210, 245, 0.20);
+  --skin-ribbon: linear-gradient(90deg, #2ee6c8, #57c8f2 45%, #3a7bd5);
+  --skin-shadow: 0 26px 64px -14px rgba(0, 18, 30, 0.85);
+  --skin-glow-soft: rgba(46, 230, 200, 0.16);
+}
+html[data-skin="forest"] {
+  --accent: #8fd46a;
+  --accent-dim: #5f9e42;
+  --accent-glow: rgba(143, 212, 106, 0.30);
+  --skin-surface: rgba(16, 34, 21, 0.93);
+  --skin-panel-2: rgba(9, 21, 13, 0.95);
+  --skin-border: rgba(160, 225, 130, 0.20);
+  --skin-ribbon: linear-gradient(90deg, #c9a227, #8fd46a 50%, #4f9e6a);
+  --skin-shadow: 0 26px 64px -14px rgba(4, 18, 8, 0.85);
+  --skin-glow-soft: rgba(201, 162, 39, 0.16);
+}
+
+/* 浮层面板：比 .glass 实得多。0.4 的透明度会让底下的歌词/列表透上来，
+   看起来像"文字重叠"，所以弹窗类一律用这个。
+   底色/描边/投影走皮肤变量，顶上再加一条皮肤色带。 */
+/* ⚠️ 这里绝对不能写 position！Tailwind v4 的 utility 在 @layer 里，
+   未分层的普通 CSS 优先级更高 —— 一旦在这里写 position:relative，
+   会盖掉组件上的 .fixed，面板就从固定定位退回文档流（掉到窗口底部）。
+   顶部色带用的 ::before 靠 fixed/absolute 已经有的定位上下文即可。 */
+.glass-panel {
+  background: var(--skin-surface, rgba(15, 15, 26, 0.92));
+  backdrop-filter: blur(26px) saturate(1.15);
+  -webkit-backdrop-filter: blur(26px) saturate(1.15);
+  border: 1px solid var(--skin-border, rgba(255,255,255,0.09));
+  box-shadow: var(--skin-shadow, 0 26px 64px -14px rgba(0,0,0,0.72));
+}
+html[data-skin]:not([data-skin="classic"]) .glass-panel::before {
+  content: '';
+  position: absolute; inset: 0 0 auto 0; height: 2px;
+  border-radius: 16px 16px 0 0;
+  background: var(--skin-ribbon, transparent);
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+
+/* ═══════════ 皮肤贴图（内联 SVG，不依赖外部素材） ═══════════
+   用 data URI 而不是 png：任意分辨率都清晰、不增加体积、也没有版权问题。
+   装饰只做点缀（透明度 .11~.22），不能抢内容的可读性。 */
+html[data-skin="ocean"] .glass-panel {
+  background-image:
+    url("data:image/svg+xml;charset=utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='170' viewBox='0 0 260 170'><g fill='none' stroke='%237fd8f5' stroke-linecap='round'><circle cx='214' cy='42' r='10' stroke-opacity='.20'/><circle cx='230' cy='20' r='4.5' stroke-opacity='.16'/><circle cx='192' cy='22' r='3' stroke-opacity='.14'/><path d='M-10 138 q28 -13 56 0 t56 0 t56 0 t56 0 t56 0' stroke-opacity='.20' stroke-width='1.6'/><path d='M-10 154 q28 -11 56 0 t56 0 t56 0 t56 0 t56 0' stroke-opacity='.11' stroke-width='1.2'/></g><g fill='%237fd8f5'><path d='M150 106 q17 -9 34 0 q-17 9 -34 0z' fill-opacity='.17'/><path d='M150 106 l-12 -7.5 v15z' fill-opacity='.17'/><circle cx='138' cy='94' r='2' fill-opacity='.18'/><circle cx='129' cy='83' r='1.4' fill-opacity='.14'/><circle cx='146' cy='76' r='1.2' fill-opacity='.12'/></g></svg>"),
+    radial-gradient(110% 70% at 100% 100%, var(--skin-glow-soft), transparent 62%);
+  background-repeat: no-repeat, no-repeat;
+  background-position: right -8px bottom -6px, 0 0;
+  background-size: 260px 170px, 100% 100%;
+}
+html[data-skin="forest"] .glass-panel {
+  background-image:
+    url("data:image/svg+xml;charset=utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='170' viewBox='0 0 260 170'><g fill='none' stroke='%23a8e08a' stroke-linecap='round'><path d='M238 174 q-16 -48 12 -76' stroke-opacity='.20' stroke-width='1.7'/><path d='M208 176 q7 -35 -13 -56' stroke-opacity='.14' stroke-width='1.3'/></g><g fill='%23a8e08a'><ellipse cx='243' cy='118' rx='11.5' ry='5.5' fill-opacity='.17' transform='rotate(-38 243 118)'/><ellipse cx='230' cy='138' rx='9' ry='4.5' fill-opacity='.13' transform='rotate(-58 230 138)'/><ellipse cx='209' cy='112' rx='9.5' ry='4.6' fill-opacity='.15' transform='rotate(24 209 112)'/><ellipse cx='198' cy='133' rx='8' ry='4' fill-opacity='.11' transform='rotate(8 198 133)'/><circle cx='216' cy='84' r='2.2' fill-opacity='.22'/><circle cx='234' cy='70' r='1.6' fill-opacity='.18'/><circle cx='228' cy='96' r='1.3' fill-opacity='.15'/></g></svg>"),
+    radial-gradient(110% 70% at 100% 100%, var(--skin-glow-soft), transparent 62%);
+  background-repeat: no-repeat, no-repeat;
+  background-position: right -8px bottom -8px, 0 0;
+  background-size: 260px 170px, 100% 100%;
+}
+
+/* 皮肤下的按键：hover/激活时带一点主色雾，不再是纯白 */
+html[data-skin]:not([data-skin="classic"]) .skin-btn:hover {
+  background: var(--skin-glow-soft);
+}
+/* 皮肤下播放键改用主色，配深色图标 */
+html[data-skin]:not([data-skin="classic"]) .main-play {
+  background: var(--accent);
+  box-shadow: 0 6px 20px -6px var(--accent-glow), 0 0 0 1px rgba(255,255,255,0.12) inset;
 }
 
 .text-gradient {
