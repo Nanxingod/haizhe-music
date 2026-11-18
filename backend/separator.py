@@ -105,6 +105,84 @@ def is_available() -> bool:
         return False
 
 
+# ── 高质量模型（PolarFormer）就绪判断 + 一键准备（V15.1）──────────────
+# 为什么需要这个：pip 装完 torch/audio-separator 只是"能跑了"，
+# 但 hq 模型不在 audio-separator 的注册表里，必须额外下权重 + 打 PoPE 补丁。
+# 以前这步只能让用户去命令行跑 setup_stem_models.py —— 对普通用户等于不可用。
+HQ_YAML = "model_bs_polarformer_float16.yaml"
+SETUP_SCRIPT = Path(__file__).parent / "setup_stem_models.py"
+
+_prep_lock = threading.Lock()
+_prep: dict = {"running": False, "done": False, "ok": False, "log": [], "error": ""}
+
+
+def hq_ready() -> bool:
+    """高质量模型是否已就绪（权重要有，修正版 yaml 也要有）"""
+    return (MODEL_DIR / MODELS["hq"]).exists() and (MODEL_DIR / HQ_YAML).exists()
+
+
+def prepare_job() -> dict:
+    with _prep_lock:
+        return {"running": _prep["running"], "done": _prep["done"],
+                "ok": _prep["ok"], "error": _prep["error"], "log": list(_prep["log"])}
+
+
+def prepare_hq() -> dict:
+    """后台准备 hq 模型：打补丁 + 下载 102MB + 生成 yaml（脚本本身幂等）"""
+    with _prep_lock:
+        if _prep["running"]:
+            return {"started": True, "already": True}
+        _prep.update({"running": True, "done": False, "ok": False, "log": [], "error": ""})
+
+    def run() -> None:
+        import subprocess
+        # 打包版（PyInstaller）里脚本不在磁盘上，sys.executable 是 exe 本身 ——
+        # 直接跑会得到一句莫名其妙的报错，这里提前说清楚。
+        if not SETUP_SCRIPT.exists():
+            with _prep_lock:
+                _prep.update({"running": False, "done": True, "ok": False,
+                              "error": "当前是打包版，自动下载不可用；请手动把模型放到 cache/stem_models/"})
+            return
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-u", str(SETUP_SCRIPT)],
+                cwd=str(SETUP_SCRIPT.parent),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", env=env,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            for line in proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                with _prep_lock:
+                    _prep["log"].append(line[:300])
+                    del _prep["log"][:-200]        # 只留最近 200 行
+            code = proc.wait()
+            ok = (code == 0) and hq_ready()
+            err = ""
+            if not ok:
+                # 把晦涩的 traceback 翻成人话：用户看到 URLError 也不知道该干什么
+                tail = "\n".join(_prep["log"][-12:])
+                if hq_ready():
+                    err = "模型已就绪，无需重复下载"
+                elif "URLError" in tail or "Tunnel connection" in tail or "timed out" in tail:
+                    err = "网络不通，模型下载失败。请检查代理/网络后重试"
+                elif "sha256" in tail:
+                    err = "下载文件校验失败（可能被代理拦截），请重试"
+                else:
+                    err = "退出码 %s，模型文件未就绪" % code
+            with _prep_lock:
+                _prep.update({"running": False, "done": True, "ok": ok, "error": err})
+        except Exception as e:
+            with _prep_lock:
+                _prep.update({"running": False, "done": True, "ok": False, "error": str(e)})
+
+    threading.Thread(target=run, daemon=True).start()
+    return {"started": True}
+
+
 def _mode(quality: str) -> str:
     """处理方式标识：standard/CPU → C，hq/GPU → G（用于分离目录命名）"""
     return "G" if quality == "hq" else "C"

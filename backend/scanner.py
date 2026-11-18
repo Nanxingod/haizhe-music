@@ -32,6 +32,13 @@ def _load_music_dir() -> Path:
         print(f"[Scanner] 配置读取失败: {e}")
     return default
 
+# 第三方依赖（pypinyin 等）装在 backend/vendor，不走系统环境
+_VENDOR = Path(__file__).parent / "vendor"
+if _VENDOR.is_dir():
+    import sys as _sys
+    if str(_VENDOR) not in _sys.path:
+        _sys.path.insert(0, str(_VENDOR))
+
 MUSIC_DIR = _load_music_dir()
 
 # 封面缩略图缓存目录
@@ -262,6 +269,13 @@ def scan_all() -> tuple[list[Song], list[Artist]]:
 
     print(f"[Scanner] 完成: {len(songs)} 首歌, {len(artists)} 位歌手, "
           f"{extracted} 个新封面, 缓存命中 {cache_hits}/{total}")
+    # 预建拼音索引：首次搜索就不用现场算（740 首约 0.2 秒）
+    try:
+        for _s in songs:
+            _py_of(_s)
+    except Exception:
+        pass
+
     return songs, artists
 
 
@@ -270,7 +284,48 @@ def get_songs_by_artist(songs: list[Song], artist: str) -> list[Song]:
     return [s for s in songs if artist in s.artists]
 
 
+# ── 拼音搜索（V14.9）────────────────────────────────────────────
+# 支持三种输入：中文子串（晴天）、全拼（qingtian）、首字母（qt / zjl）。
+# 索引懒建：第一次搜索时给每首歌算一次，之后常驻内存（740 首约 0.3 秒）。
+_PY_INDEX: dict[str, tuple[str, str, str, str]] = {}
+
+
+def _pinyin_of(text: str) -> tuple[str, str]:
+    try:
+        from pypinyin import lazy_pinyin, Style
+        full = "".join(lazy_pinyin(text)).lower()
+        ini = "".join(lazy_pinyin(text, style=Style.FIRST_LETTER)).lower()
+        return full, ini
+    except Exception:
+        return "", ""          # 没有 pypinyin 时退化为纯中文搜索，不影响启动
+
+
+def _py_of(song: Song) -> tuple[str, str, str, str]:
+    got = _PY_INDEX.get(song.id)
+    if got is None:
+        t_full, t_ini = _pinyin_of(song.title)
+        a_full, a_ini = _pinyin_of(song.artist)
+        got = (t_full, t_ini, a_full, a_ini)
+        _PY_INDEX[song.id] = got
+    return got
+
+
 def search_songs(songs: list[Song], query: str) -> list[Song]:
-    """搜索歌曲（匹配歌名或歌手字段）"""
-    q = query.lower()
-    return [s for s in songs if q in s.title.lower() or q in s.artist.lower()]
+    """搜索歌曲：歌名/歌手的子串，或全拼、首字母"""
+    q = (query or "").strip().lower()
+    if not q:
+        return list(songs)
+    compact = q.replace(" ", "")
+    hit = []
+    for s in songs:
+        if q in s.title.lower() or q in s.artist.lower():
+            hit.append(s)
+            continue
+        if len(compact) < 2:
+            continue
+        t_full, t_ini, a_full, a_ini = _py_of(s)
+        if compact in t_full or compact in a_full:
+            hit.append(s)
+        elif 2 <= len(compact) <= 10 and (compact in t_ini or compact in a_ini):
+            hit.append(s)
+    return hit

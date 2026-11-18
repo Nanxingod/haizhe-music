@@ -2,3 +2,6 @@ fastapi>=0.100.0
 uvicorn[standard]>=0.23.0
 mutagen>=1.46.0
 aiofiles>=23.0
+pypinyin>=0.51.0        # 拼音搜索（首字母/全拼），纯 Python，装在 backend/vendor
+numpy>=1.23            # melody.py 顶层 import（缺了后端直接起不来）
+Pillow>=9.0            # 封面缩略图生成（缺了封面静默跳过）

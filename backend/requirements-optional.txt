@@ -1,0 +1,18 @@
+# 可选功能依赖 —— 不装也能正常播放，只是对应功能置灰
+#
+# 安装方式（二选一）：
+#   1) 应用内：设置 → 🧩 功能组件 → 点「安装」（推荐，装到 %LOCALAPPDATA%\Haizhe\deps）
+#   2) 命令行：pip install -r requirements-optional.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# 注意：torch 体积很大（约 2.5GB），装之前确认磁盘空间。
+# 国内网络建议用镜像；安装器/打包版同样走镜像。
+
+# ── 旋律（音高走向图）：约 150MB ──
+librosa>=0.10          # 必需
+torchcrepe>=0.0.23     # 加速项：有则 CREPE 约 23 秒，无则退 pyin 约 140 秒
+
+# ── 人声 / 伴奏分离：约 2.5GB（含 torch）──
+audio-separator>=0.18
+onnxruntime>=1.16
+imageio-ffmpeg>=0.5
+torch>=2.0             # GPU 用户请按 CUDA 版本装，见 README

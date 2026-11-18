@@ -615,6 +615,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (songs[startIndex]) persistPlayerState(state.playMode, songs[startIndex].id);
   }, [state.playMode, persistPlayerState]);
 
+  // V14.8: 播放历史上报。只在"换歌"时触发一次（依赖 currentSong.id），
+  // 不随进度变化；后端对同一首歌 3 分钟内重复播放会去重。
+  useEffect(() => {
+    const id = state.currentSong?.id;
+    if (!id || !state.isPlaying) return;
+    api.recordPlay(id).catch(() => { /* 上报失败不影响播放 */ });
+  }, [state.currentSong?.id]);
+
   // ⚡ useMemo 稳定 context value，防止每次渲染生成新对象导致消费者全量重渲染
   const ctxValue = useMemo(() => ({ state, dispatch, audioRef, play, playArtist }), [state, dispatch, play, playArtist]);
 

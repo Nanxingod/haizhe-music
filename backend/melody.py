@@ -43,6 +43,7 @@ if "torchaudio" not in sys.modules:
         sys.modules["torchaudio"] = _stub
 
 import scanner  # noqa: E402
+import deps as deps_mod  # noqa: E402
 import separator as stems_mod  # noqa: E402
 
 # librosa 懒加载：它连带 numpy/scipy/audioread 一起进来要占几十 MB，
@@ -246,6 +247,15 @@ def _cache_path(filepath: str, title: str) -> Path:
 def get(song_id: str, filepath: str, title: str,
         lrc_path: str | None, force: bool = False) -> dict:
     """返回旋律数据。status: ok / no_vocals / separator_unavailable / error"""
+    # 缺 librosa 时直接告诉前端"去装组件"，别让用户看到 500
+    miss = deps_mod.missing("melody")
+    if miss:
+        return {
+            "status": "missing_deps", "feature": "melody", "missing": miss,
+            "cached": False, "has_vocals": False, "notes": [],
+            "message": "缺少旋律分析所需的组件：" + "、".join(miss),
+        }
+
     vocals = stems_mod.stems_path(song_id, "vocals")
     has_vocals = vocals and Path(vocals).exists()
 
@@ -286,6 +296,15 @@ def get(song_id: str, filepath: str, title: str,
 
 def _analyze(song_id: str, filepath: str, title: str,
              lrc_path: str | None, has_vocals: bool) -> dict:
+    # 缺 librosa 时直接告诉前端"去装组件"，别让用户看到 500
+    miss = deps_mod.missing("melody")
+    if miss:
+        return {
+            "status": "missing_deps", "feature": "melody", "missing": miss,
+            "cached": False, "has_vocals": False, "notes": [],
+            "message": "缺少旋律分析所需的组件：" + "、".join(miss),
+        }
+
     vocals = stems_mod.stems_path(song_id, "vocals")
     t0 = time.time()
     try:

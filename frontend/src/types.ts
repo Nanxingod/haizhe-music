@@ -43,6 +43,10 @@ export interface StemStatus {
   gpu: boolean;         // 是否有 CUDA GPU 加速
   status: 'none' | 'processing' | 'ready' | 'error';
   progress: number;     // 0-100
+  /** available=false 时缺哪些包（可直接引导安装） */
+  missing?: string[];
+  /** 高质量模型（PolarFormer 102MB）是否已下载；false 时点 hq 会失败 */
+  hq_ready?: boolean;
   quality?: StemQuality | null;
   error?: string | null;
 }
@@ -166,8 +170,10 @@ export interface MelodyLine {
 }
 
 export interface MelodyData {
-  /** ok / no_vocals / error */
-  status: 'ok' | 'no_vocals' | 'error';
+  /** ok / no_vocals / error / missing_deps（缺 librosa 等组件） */
+  status: 'ok' | 'no_vocals' | 'error' | 'missing_deps';
+  /** status=missing_deps 时缺哪些包 */
+  missing?: string[];
   message?: string;
   /** crepe/cuda 或 pyin */
   method?: string;
@@ -178,4 +184,76 @@ export interface MelodyData {
   took_ms?: number;
   cached: boolean;
   has_vocals: boolean;
+}
+
+
+/** V14.8: 收藏 / 歌单 / 最近播放 */
+export interface Playlist {
+  id: string;
+  name: string;
+  count: number;
+}
+
+export interface LibrarySummary {
+  favorites: number;
+  playlists: Playlist[];
+  recent: number;
+}
+
+export interface LibraryList {
+  title: string;
+  songs: Song[];
+  /** 歌单里存在但曲库已找不到的条数（文件被删/改名） */
+  missing: number;
+}
+
+
+/** V15.3: 曲库画像（音乐画像页） */
+export interface InsightGenre { name: string; count: number; pct: number }
+export interface InsightTag { name: string; count: number }
+
+export interface InsightPick {
+  title: string;
+  artist: string;
+  genre: string;
+  reason: string;
+  kind: 'safe' | 'adjacent' | 'explore';
+  /** 网易云是否真的搜到了这首歌 */
+  verified: boolean;
+  url: string;
+  bili: string;
+  cover: string;
+}
+
+export interface InsightProfile {
+  version: number;
+  generated_at: number;
+  source_key: string;
+  stats: {
+    songs: number; artists: number; hours: number;
+    avg_minutes: number; lyrics_pct: number; labeled: number; unlabeled?: number;
+  };
+  genres: InsightGenre[];
+  tags: InsightTag[];
+  artists: { name: string; count: number }[];
+  recommendations?: { generated_at: number; theme: string; items: InsightPick[] };
+}
+
+export interface InsightJob {
+  running: boolean;
+  stage: string;
+  done: number;
+  total: number;
+  progress: number;
+  error: string;
+  labeled: number;
+}
+
+export interface InsightsState {
+  has_key: boolean;
+  job: InsightJob;
+  profile: InsightProfile | null;
+  /** 曲库和画像生成时不一致（增删过歌） */
+  stale: boolean;
+  songs: number;
 }

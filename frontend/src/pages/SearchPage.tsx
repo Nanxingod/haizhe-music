@@ -49,7 +49,7 @@ export const SearchPage = memo(function SearchPage() {
     setSearchParams(input ? { q: input } : {});
   };
 
-  const handlePlay = (song: Song, _index: number) => {
+  const handlePlay = (song: Song) => {
     play(song, songs);
   };
 
@@ -127,7 +127,7 @@ export const SearchPage = memo(function SearchPage() {
                   initial={{ opacity: 0, y: 5 }}
                   animate={{ opacity: 1, y: 0 }}
                   transition={{ delay: Math.min(i * 0.01, 0.3) }}
-                  onClick={() => handlePlay(song, i)}
+                  onClick={() => handlePlay(song)}
                   className={`flex items-center gap-4 p-2.5 rounded-xl cursor-pointer transition-all duration-200 group hover:bg-white/5 ${
                     isCurrentSong(song) ? 'bg-white/10' : ''
                   }`}

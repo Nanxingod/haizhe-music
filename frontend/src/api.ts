@@ -1,6 +1,6 @@
 // 音乐播放器 - API 客户端
 
-import type { Song, Artist, Lyrics, SearchResult, StemStatus, StemItem, StemQuality, RelinkResult, ArtistInfo, MelodyData } from './types';
+import type { Song, Artist, Lyrics, SearchResult, StemStatus, StemItem, StemQuality, RelinkResult, ArtistInfo, MelodyData, LibrarySummary, LibraryList, InsightsState, InsightPick } from './types';
 
 // ⚡ V13.2: Electron 桌面端直连后端，不再依赖 Vite 的 proxy。
 // 起因是一次真实故障：Vite(5173) 进程意外退出后，渲染进程所有 /api 请求全部
@@ -14,6 +14,25 @@ const BASE = API_BASE;
 async function fetchJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, signal ? { signal } : undefined);
   if (!res.ok) {
+    // FastAPI 的报错在 {"detail": "..."} 里；直接抛整段 JSON 用户看不懂
+    const raw = await res.text().catch(() => '');
+    let msg = raw;
+    try {
+      const j = JSON.parse(raw);
+      msg = j.detail || j.message || raw;
+    } catch { /* 不是 JSON 就用原文 */ }
+    throw new Error(msg || `请求失败 (${res.status})`);
+  }
+  return res.json();
+}
+
+async function postJSON<T>(url: string, body?: unknown, method = 'POST'): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) {
     const err = await res.text().catch(() => 'Unknown error');
     throw new Error(`API Error ${res.status}: ${err}`);
   }
@@ -22,6 +41,12 @@ async function fetchJSON<T>(url: string, signal?: AbortSignal): Promise<T> {
 
 export const api = {
   getStatus: () => fetchJSON<{ songs: number; artists: number }>(`${BASE}/api/status`),
+
+  getConfig: () => fetchJSON<{ music_dir: string; relink: { deepseek: boolean; tavily: boolean; search: boolean } }>(`${BASE}/api/config`),
+
+  /** 切换曲库（会同步写 config.json 并全量重扫，冷扫约 7-14 秒） */
+  setMusicDir: (dir: string) =>
+    postJSON<{ music_dir: string; songs: number; artists: number }>(`${BASE}/api/config`, { music_dir: dir }),
 
   getArtists: () => fetchJSON<Artist[]>(`${BASE}/api/artists`),
 
@@ -52,8 +77,73 @@ export const api = {
   refreshSongs: () =>
     fetch(`${BASE}/api/refresh`, { method: 'POST' }).then(r => r.json()),
 
+  // V15: 可选依赖（能力探测 + 按需安装）
+  getDeps: () => fetchJSON<any>(`${BASE}/api/deps`),
+  installDep: (feature: string) => postJSON<{ started: boolean }>(`${BASE}/api/deps/install`, { feature }),
+  getDepJob: () => fetchJSON<any>(`${BASE}/api/deps/job`),
+
+  // V15: 歌词补齐（备用，只补缺失）
+  lyricsMissing: () =>
+    fetchJSON<{ count: number; songs: { id: string; title: string; artist: string }[] }>(`${BASE}/api/lyrics/missing`),
+
+  fetchMissingLyrics: (limit = 20) =>
+    postJSON<{ checked: number; filled: number; remaining: number; results: any[] }>(
+      `${BASE}/api/lyrics/fetch-missing`, { limit }),
+
+  // V15.3: 曲库画像
+  getInsights: () => fetchJSON<InsightsState>(`${BASE}/api/insights`),
+
+  /** 启动分析（后台分批）。limit>0 仅用于调试 */
+  analyzeInsights: (limit = 0) =>
+    postJSON<{ started: boolean; already?: boolean }>(`${BASE}/api/insights/analyze`, { limit }),
+
+  /** 换一批「可能想听」：LLM + 网易云校验，约 10-30 秒 */
+  recommendInsights: (count = 8) =>
+    postJSON<{ generated_at: number; theme: string; items: InsightPick[] }>(
+      `${BASE}/api/insights/recommend`, { count }),
+
+  // V14.8: 收藏 / 歌单 / 最近播放
+  getLibrary: () => fetchJSON<LibrarySummary>(`${BASE}/api/library`),
+
+  getLibraryList: (type: 'favorites' | 'recent' | 'playlist', id = '') =>
+    fetchJSON<LibraryList>(`${BASE}/api/library/list?type=${type}${id ? `&id=${encodeURIComponent(id)}` : ''}`),
+
+  toggleFavorite: (songId: string) =>
+    postJSON<{ on: boolean }>(`${BASE}/api/library/favorite`, { song_id: songId }),
+
+  createPlaylist: (name: string) =>
+    postJSON<{ id: string; name: string; count: number }>(`${BASE}/api/library/playlist`, { name }),
+
+  renamePlaylist: (id: string, name: string) =>
+    postJSON<{ ok: boolean }>(`${BASE}/api/library/playlist/${id}`, { name }, 'PATCH'),
+
+  deletePlaylist: (id: string) =>
+    postJSON<{ ok: boolean }>(`${BASE}/api/library/playlist/${id}`, undefined, 'DELETE'),
+
+  songPlaylists: (songId: string) =>
+    fetchJSON<{ playlists: string[]; favorite: boolean }>(`${BASE}/api/library/song/${songId}`),
+
+  addToPlaylist: (id: string, songId: string) =>
+    postJSON<{ on: boolean }>(`${BASE}/api/library/playlist/${id}/add`, { song_id: songId }),
+
+  removeFromPlaylist: (id: string, songId: string) =>
+    postJSON<{ on: boolean }>(`${BASE}/api/library/playlist/${id}/remove`, { song_id: songId }),
+
+  toggleInPlaylist: (id: string, songId: string) =>
+    postJSON<{ on: boolean }>(`${BASE}/api/library/playlist/${id}/toggle`, { song_id: songId }),
+
+  recordPlay: (songId: string) =>
+    postJSON<{ ok: boolean }>(`${BASE}/api/library/play`, { song_id: songId }),
+
   // V12: 人声/伴奏分离
   getStems: (id: string) => fetchJSON<StemStatus>(`${BASE}/api/stems/${id}`),
+
+  /** 下载高质量分离模型（PolarFormer 102MB，脚本幂等） */
+  prepareHqModel: () =>
+    postJSON<{ started: boolean; already?: boolean }>(`${BASE}/api/stems/prepare-hq`, {}),
+  getHqJob: () =>
+    fetchJSON<{ running: boolean; done: boolean; ok: boolean; error: string; log: string[] }>(
+      `${BASE}/api/stems/prepare-hq/job`),
 
   listStems: () =>
     fetchJSON<{ available: boolean; gpu: boolean; items: StemItem[] }>(`${BASE}/api/stems`),

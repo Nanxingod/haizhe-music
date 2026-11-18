@@ -9,6 +9,8 @@ import { CoverThumbnail } from './Sidebar';
 import { FxPanel } from './FxPanel';
 import { MelodyPanel } from './MelodyPanel';
 import { isPipLocked, setPipLocked } from '../pipLock';
+import { useLibrary } from '../libraryStore';
+import { SongMenu } from './SongMenu';
 import { RelinkPanel } from './RelinkPanel';
 
 function fmt(s: number): string {
@@ -135,6 +137,9 @@ export function PlayerBar() {
   // 'song' | 'artist' | null —— 两个面板互斥，同时只看一个
   const [linkOn, setLinkOn] = useState<'song' | 'artist' | null>(null);
   const [melodyOn, setMelodyOn] = useState(false);
+  const [songMenuAt, setSongMenuAt] = useState<DOMRect | null>(null);
+  const songMenuBtnRef = useRef<HTMLButtonElement>(null);
+  const { favorites, toggleFav } = useLibrary();
   const melodyBtnRef = useRef<HTMLButtonElement>(null);
   const titleRef = useRef<HTMLDivElement>(null);
   const artistRef = useRef<HTMLParagraphElement>(null);
@@ -271,6 +276,7 @@ export function PlayerBar() {
 
       {/* Bottom bar */}
       <div className="h-18 glass shrink-0 px-4 flex items-center gap-4 relative max-md:h-14 max-md:gap-2 max-md:px-2">
+        {songMenuAt && <SongMenu song={currentSong} anchor={songMenuAt} onClose={() => setSongMenuAt(null)} />}
         {fxOn && <FxPanel onClose={() => setFxOn(false)} anchorRef={fxBtnRef} />}
         {melodyOn && (
           <MelodyPanel
@@ -316,6 +322,27 @@ export function PlayerBar() {
               className="text-xs text-white/30 truncate cursor-pointer select-none hover:text-white/60 transition-colors">
               {currentSong.artist}
             </p>
+          </div>
+
+          {/* 正在播放这首歌：收藏 / 加入歌单 */}
+          <div className="flex items-center gap-0.5 shrink-0 max-md:hidden">
+            <button
+              onClick={() => toggleFav(currentSong.id)}
+              title={favorites.has(currentSong.id) ? '取消收藏' : '收藏到「我喜欢」'}
+              className={`w-7 h-7 rounded-lg flex items-center justify-center text-[15px] transition-colors ${
+                favorites.has(currentSong.id) ? 'text-[var(--accent)]' : 'text-white/25 hover:text-white/70'
+              }`}>
+              {favorites.has(currentSong.id) ? '★' : '☆'}
+            </button>
+            <button
+              ref={songMenuBtnRef}
+              onClick={() => setSongMenuAt(songMenuBtnRef.current?.getBoundingClientRect() ?? null)}
+              title="加入歌单"
+              className="w-7 h-7 rounded-lg flex items-center justify-center text-white/25 hover:text-white/70 hover:bg-white/10 transition-colors">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/>
+              </svg>
+            </button>
           </div>
         </div>
 

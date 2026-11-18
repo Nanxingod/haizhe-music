@@ -10,6 +10,9 @@ from fastapi.responses import StreamingResponse, FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
+import deps
+deps.ensure_path()          # 可选依赖目录（%LOCALAPPDATA%\Haizhe\deps / 兼容旧 vendor）
+
 import scanner
 from scanner import scan_all, search_songs, get_songs_by_artist, COVER_CACHE_DIR
 from lyrics import parse_lrc
@@ -18,6 +21,9 @@ import separator as stems_mod
 import relinks as relink_mod
 import artist_info as artist_mod
 import melody as melody_mod
+import library as lib_mod
+import lyric_fetch as lyric_mod
+import insights as insights_mod
 
 app = FastAPI(title="小海蜇音乐播放器", version="2.2.0")
 
@@ -40,6 +46,173 @@ async def startup():
     # 老式 song_id 命名的分离目录改为「原文件名_C/G」
     stems_mod.migrate_legacy({s.id: s.file_path for s in ALL_SONGS})
     print(f"[Server] 启动完成，{len(ALL_SONGS)} 首歌就绪")
+
+
+# ═══ 可选依赖：能力探测 + 按需安装（V15）════════════════════════════
+
+@app.get("/api/deps")
+def deps_status():
+    return deps.status()
+
+
+@app.post("/api/deps/install")
+def deps_install(body: dict):
+    r = deps.install(str(body.get("feature") or ""))
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error") or "安装启动失败")
+    return {"started": True}
+
+
+@app.get("/api/deps/job")
+def deps_job():
+    return deps.job()
+
+# ═══ 歌词补齐（V15，备用功能：只补缺失，不覆盖已有）══════════════
+
+@app.get("/api/lyrics/missing")
+def lyrics_missing(limit: int = Query(default=50, ge=1, le=500)):
+    miss = [s for s in ALL_SONGS if not s.has_lrc]
+    return {
+        "count": len(miss),
+        "songs": [{"id": s.id, "title": s.title, "artist": s.artist} for s in miss[:limit]],
+    }
+
+
+@app.post("/api/lyrics/fetch/{song_id}")
+def lyrics_fetch_one(song_id: str):
+    song = next((s for s in ALL_SONGS if s.id == song_id), None)
+    if not song:
+        raise HTTPException(404, "歌曲不存在")
+    return lyric_mod.fetch_one(song)
+
+
+@app.post("/api/lyrics/fetch-missing")
+def lyrics_fetch_missing(body: dict):
+    limit = int(body.get("limit") or 20)
+    return lyric_mod.fetch_missing(ALL_SONGS, limit=limit)
+
+# ═══ 收藏 / 歌单 / 最近播放（V14.8）═══════════════════════════════
+
+def _songs_by_id() -> dict:
+    return {s.id: s for s in ALL_SONGS}
+
+
+@app.get("/api/library")
+def get_library():
+    """导航栏用：收藏数、歌单列表（含数量）、最近播放条数"""
+    return lib_mod.summary()
+
+
+@app.get("/api/library/list")
+def get_library_list(type: str = Query(default="favorites"), id: str = Query(default=""),
+                     limit: int = Query(default=1000, ge=1, le=2000)):
+    if type == "favorites":
+        ids, title = lib_mod.playlist_songs(lib_mod.FAV_ID), lib_mod.FAV_NAME
+    elif type == "recent":
+        ids, title = lib_mod.recent_ids(limit), "最近播放"
+    elif type == "playlist":
+        ids, title = lib_mod.playlist_songs(id), lib_mod.playlist_name(id)
+        if ids is None:
+            raise HTTPException(404, "歌单不存在")
+    else:
+        raise HTTPException(400, "type 只能是 favorites / recent / playlist")
+
+    by_id = _songs_by_id()
+    songs = [by_id[i] for i in (ids or []) if i in by_id]
+    return {"title": title, "songs": songs, "missing": len([i for i in (ids or []) if i not in by_id])}
+
+
+@app.post("/api/library/favorite")
+def toggle_favorite(body: dict):
+    song_id = str(body.get("song_id") or "")
+    if not song_id:
+        raise HTTPException(400, "缺少 song_id")
+    return {"on": lib_mod.toggle_favorite(song_id)}
+
+
+@app.post("/api/library/playlist")
+def create_playlist(body: dict):
+    return lib_mod.create_playlist(str(body.get("name") or ""))
+
+
+@app.patch("/api/library/playlist/{pid}")
+def rename_playlist(pid: str, body: dict):
+    if not lib_mod.rename_playlist(pid, str(body.get("name") or "")):
+        raise HTTPException(400, "歌单不存在或名称为空")
+    return {"ok": True}
+
+
+@app.delete("/api/library/playlist/{pid}")
+def delete_playlist(pid: str):
+    if not lib_mod.delete_playlist(pid):
+        raise HTTPException(404, "歌单不存在")
+    return {"ok": True}
+
+
+@app.post("/api/library/playlist/{pid}/toggle")
+def toggle_in_playlist(pid: str, body: dict):
+    song_id = str(body.get("song_id") or "")
+    if not song_id:
+        raise HTTPException(400, "缺少 song_id")
+    on = lib_mod.toggle_in_playlist(pid, song_id)
+    if on is None:
+        raise HTTPException(404, "歌单不存在")
+    return {"on": on}
+
+
+@app.get("/api/library/song/{song_id}")
+def song_playlists(song_id: str):
+    """这首歌在哪些歌单里 + 是否已收藏（行内菜单用）"""
+    return {"playlists": lib_mod.playlists_of(song_id), "favorite": lib_mod.is_favorite(song_id)}
+
+
+@app.post("/api/library/playlist/{pid}/add")
+def add_to_playlist(pid: str, body: dict):
+    song_id = str(body.get("song_id") or "")
+    if not song_id:
+        raise HTTPException(400, "缺少 song_id")
+    if lib_mod.add_to_playlist(pid, song_id) is None:
+        raise HTTPException(404, "歌单不存在")
+    return {"on": True}
+
+
+@app.post("/api/library/playlist/{pid}/remove")
+def remove_from_playlist(pid: str, body: dict):
+    song_id = str(body.get("song_id") or "")
+    if not song_id:
+        raise HTTPException(400, "缺少 song_id")
+    if lib_mod.remove_from_playlist(pid, song_id) is None:
+        raise HTTPException(404, "歌单不存在")
+    return {"on": False}
+
+
+@app.post("/api/library/play")
+def record_play(body: dict):
+    """前端每次开始播放一首歌时上报（库内做 3 分钟去重）"""
+    song_id = str(body.get("song_id") or "")
+    if song_id:
+        lib_mod.record_play(song_id)
+    return {"ok": True}
+
+@app.get("/api/insights")
+def insights_state():
+    """曲库画像：缓存结果 + 任务进度（前端轮询）"""
+    return insights_mod.state(ALL_SONGS)
+
+
+@app.post("/api/insights/analyze")
+def insights_analyze(body: dict):
+    """启动一次分析（后台分批打标）。body.limit 仅用于调试/试跑。"""
+    return insights_mod.analyze(ALL_SONGS, limit=int(body.get("limit") or 0))
+
+
+@app.post("/api/insights/recommend")
+def insights_recommend(body: dict):
+    """换一批「可能想听」：口味画像 + 随机主题 → LLM → 网易云逐条校验"""
+    try:
+        return insights_mod.recommend(ALL_SONGS, count=int(body.get("count") or 8))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/artists")
@@ -338,6 +511,7 @@ def set_config(body: dict):
     relink_mod.clear_cache()
     artist_mod.clear_cache()
     melody_mod.clear_cache()
+    lib_mod.clear_cache()
     print(f"[Config] 音乐目录已切换: {msg}，共 {len(ALL_SONGS)} 首")
     return {"music_dir": msg, "songs": len(ALL_SONGS), "artists": len(ARTISTS),
             "relink": relink_mod.status()}
@@ -392,8 +566,21 @@ async def stems_list():
     return {
         "available": stems_mod.is_available(),
         "gpu": stems_mod.has_gpu(),
+        "missing": deps.missing("stems"),      # 空 = 环境齐了；非空可直接引导安装
+        "hq_ready": stems_mod.hq_ready(),      # 高质量模型（102MB）是否已下载
         "items": stems_mod.list_ready(),
     }
+
+
+@app.get("/api/stems/prepare-hq/job")
+def stems_prepare_hq_job():
+    """高质量模型准备进度（幂等脚本：打补丁 + 下载 102MB + 生成 yaml）"""
+    return stems_mod.prepare_job()
+
+
+@app.post("/api/stems/prepare-hq")
+def stems_prepare_hq():
+    return stems_mod.prepare_hq()
 
 
 @app.get("/api/stems/{song_id}")
@@ -405,6 +592,8 @@ async def stems_status(song_id: str):
     return {
         "available": stems_mod.is_available(),
         "gpu": stems_mod.has_gpu(),
+        "missing": deps.missing("stems"),
+        "hq_ready": stems_mod.hq_ready(),
         "status": "processing" if processing else ("ready" if ready else task.get("status", "none")),
         "progress": task.get("progress", 0) if processing else (100 if ready else task.get("progress", 0)),
         "quality": task.get("quality") if processing else (stems_mod.cached_quality(song_id) if ready else None),

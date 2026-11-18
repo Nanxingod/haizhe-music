@@ -1,5 +1,7 @@
 # ── 运行时依赖 ──
 node_modules/
+.venv/
+venv/
 frontend/node_modules/
 
 # ── Python 运行时 ──

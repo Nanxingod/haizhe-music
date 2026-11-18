@@ -16,6 +16,12 @@
 //   - 非手势上下文不建图：suspended 的 AudioContext 会吞掉音频导致静音，
 //     持久化恢复的移调等首次手势后再激活（期间直通播放，不静音）。
 import SignalsmithStretch from 'signalsmith-stretch';
+
+/** 移调引擎的加载状态（UI 用来显示"加载中/不可用"，避免用户以为点了没反应） */
+export type FxStatus = { loading?: boolean; ready?: boolean; error?: string };
+function emitFx(detail: FxStatus) {
+  try { window.dispatchEvent(new CustomEvent('haizhe-fx-status', { detail })); } catch { /* 非浏览器环境忽略 */ }
+}
 import type { StretchNode } from 'signalsmith-stretch';
 
 export interface FxParams {
@@ -55,6 +61,7 @@ export class FxEngine {
     if (this.graphPromise) return this.graphPromise;
     if (!this.audio) return Promise.resolve(false);
     this.graphPromise = (async () => {
+      emitFx({ loading: true });
       try {
         const audio = this.audio;
         if (!audio) return false;
@@ -66,9 +73,11 @@ export class FxEngine {
         this.srcNode = srcNode;
         this.stretch = stretch;
         this.route(); // 按当前 bypass 状态接线
+        emitFx({ loading: false, ready: true });
         return true;
       } catch (err) {
         console.warn('[Fx] Signalsmith Stretch 管线初始化失败，移调不可用（倍速/小黄人不受影响）:', err);
+        emitFx({ loading: false, error: '音频管线初始化失败' });
         return false;
       } finally {
         this.graphPromise = null;

@@ -1,3 +1,4 @@
 {
-  "music_dir": "D:\\Music\\我的歌曲"
+  "_comment": "首次启动的三步向导会自动生成 config.json；也可以手动复制本文件后修改。music_dir 留空表示使用系统音乐文件夹（~/Music）。",
+  "music_dir": ""
 }

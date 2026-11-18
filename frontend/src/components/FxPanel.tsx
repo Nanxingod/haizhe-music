@@ -6,6 +6,7 @@ import type { CSSProperties, RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { usePlayer } from '../store';
 import { api } from '../api';
+import { DepsMissing } from './DepsMissing';
 import type { Stem, StemStatus, StemQuality } from '../types';
 
 const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
@@ -17,7 +18,9 @@ export function FxPanel({ onClose, anchorRef }: {
   const { state, dispatch } = usePlayer();
   const { playbackRate, pitchSemitones, chipmunk, stem, currentSong } = state;
   const [stemStatus, setStemStatus] = useState<StemStatus | null>(null);
-  const [busy, setBusy] = useState(false); // 分离请求进行中
+  const [busy, setBusy] = useState(false);   // 分离请求进行中
+  const [fxStatus, setFxStatus] = useState<{ loading?: boolean; error?: string } | null>(null);
+  const [hqJob, setHqJob] = useState<{ running: boolean; done: boolean; ok: boolean; error: string; log: string[] } | null>(null);
   const [quality, setQuality] = useState<StemQuality>('standard');
   const qualityTouchedRef = useRef(false); // 用户手动选过质量后不再自动切换
   const panelRef = useRef<HTMLDivElement>(null);
@@ -75,6 +78,13 @@ export function FxPanel({ onClose, anchorRef }: {
     return () => { cancelled = true; clearInterval(timer); };
   }, [currentSong?.id]);
 
+  // 移调引擎加载状态（首次移调才加载 WASM；失败时也要说一句）
+  useEffect(() => {
+    const onStatus = (e: Event) => setFxStatus((e as CustomEvent).detail || null);
+    window.addEventListener('haizhe-fx-status', onStatus);
+    return () => window.removeEventListener('haizhe-fx-status', onStatus);
+  }, []);
+
   // 用户手动选择质量
   const chooseQuality = (q: StemQuality) => {
     qualityTouchedRef.current = true;
@@ -94,6 +104,29 @@ export function FxPanel({ onClose, anchorRef }: {
       setStemStatus(prev => prev ? { ...prev, status: 'error', error: String((e as Error).message || e) } : prev);
     } finally {
       setBusy(false);
+    }
+  };
+
+  // 高质量模型（PolarFormer 102MB）不在 audio-separator 注册表里，需要单独准备。
+  // 以前只能让用户去命令行跑脚本，现在点一下就行。
+  const prepareHq = async () => {
+    setHqJob({ running: true, done: false, ok: false, error: '', log: [] });
+    try {
+      await api.prepareHqModel();
+      const timer = window.setInterval(async () => {
+        const j = await api.getHqJob().catch(() => null);
+        if (!j) return;
+        setHqJob(j);
+        if (!j.running) {
+          window.clearInterval(timer);
+          if (j.ok && currentSong) {
+            const st = await api.getStems(currentSong.id).catch(() => null);
+            if (st) setStemStatus(st);
+          }
+        }
+      }, 1500);
+    } catch (e) {
+      setHqJob({ running: false, done: true, ok: false, error: String((e as Error).message || e), log: [] });
     }
   };
 
@@ -118,7 +151,10 @@ export function FxPanel({ onClose, anchorRef }: {
     );
   };
 
-  return (
+  // ⚠️ 必须是 const panel = (...)：末尾要用 createPortal(panel) 挂到 body。
+  // 直接 return JSX 会让 portal 变成永远执行不到的死代码，而且面板被渲染在
+  // PlayerBar 内部，会被容器裁剪/层叠影响。
+  const panel = (
     <div ref={panelRef} style={pos ?? undefined}
       className="fixed right-4 z-[9999] w-[440px] max-md:w-[calc(100vw-1rem)] max-md:right-2 rounded-2xl glass-panel p-6 text-white animate-[fi_0.15s]">
       <style>{'@keyframes fi{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}'}</style>
@@ -164,6 +200,15 @@ export function FxPanel({ onClose, anchorRef }: {
         )}
       </div>
 
+      {fxStatus?.loading && (
+        <p className="text-[11px] text-white/30 -mt-3 mb-3">移调引擎加载中…（首次使用需要载入音频组件）</p>
+      )}
+      {fxStatus?.error && (
+        <p className="text-[11px] text-amber-300/70 -mt-3 mb-3">
+          移调不可用：{fxStatus.error}。倍速与小黄人不受影响。
+        </p>
+      )}
+
       {/* 小黄人 */}
       <label className="flex items-center justify-between mb-5 py-1 cursor-pointer select-none"
         onClick={() => dispatch({ type: 'TOGGLE_CHIPMUNK' })}>
@@ -193,7 +238,16 @@ export function FxPanel({ onClose, anchorRef }: {
 
       {/* 分离状态区 */}
       {!stemStatus && <p className="text-xs text-white/25">查询分离状态中…</p>}
-      {stemStatus && stemStatus.status === 'none' && (
+      {/* 缺组件：直接给安装入口，而不是让人对着灰按钮发愣 */}
+      {stemStatus && !stemStatus.available && (
+        <DepsMissing
+          feature="stems"
+          missing={stemStatus.missing && stemStatus.missing.length ? stemStatus.missing : ['torch', 'audio-separator']}
+          compact
+          onDone={() => { if (currentSong) api.getStems(currentSong.id).then(setStemStatus).catch(() => {}); }}
+        />
+      )}
+      {stemStatus && stemStatus.available && stemStatus.status === 'none' && (
         <div>
           {/* 质量选择 */}
           <div className="flex gap-2 mb-2">
@@ -207,13 +261,35 @@ export function FxPanel({ onClose, anchorRef }: {
           </div>
           <p className="text-[11px] text-white/25 mb-2.5 leading-relaxed">
             {quality === 'hq'
-              ? (stemStatus.gpu ? 'BS PolarFormer 最新模型 · GPU 约 30 秒' : 'BS PolarFormer 最新模型（首次需运行 setup_stem_models.py 下载约 102MB）· 无 GPU 时 CPU 约 20-40 分钟')
+              ? (stemStatus.gpu
+                  ? 'BS PolarFormer 最新模型 · GPU 约 30 秒'
+                  : 'BS PolarFormer 最新模型 · 无 GPU 时 CPU 约 20-40 分钟')
               : 'MDX23C 模型，CPU 约 5-15 分钟，质量较旧版显著提升'}
           </p>
-          <button onClick={() => startSeparation()} disabled={busy}
-            className="w-full py-3 rounded-lg text-sm bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors disabled:opacity-50">
-            {busy ? '启动中…' : '人声 / 伴奏分离'}
-          </button>
+          {quality === 'hq' && !stemStatus.hq_ready ? (
+            <>
+              <button onClick={prepareHq} disabled={!!hqJob?.running}
+                className="w-full py-3 rounded-lg text-sm bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors disabled:opacity-50">
+                {hqJob?.running ? '下载中…' : '下载高质量模型（102MB）'}
+              </button>
+              <p className="text-[11px] text-white/25 mt-2 leading-relaxed">
+                高质量模型不在 audio-separator 自带列表里，需要单独下（只下一次，之后一直可用）。
+              </p>
+              {hqJob?.running && hqJob.log.length > 0 && (
+                <div className="mt-2 rounded-lg bg-black/30 p-2 max-h-20 overflow-y-auto font-mono text-[10px] text-white/35 space-y-0.5">
+                  {hqJob.log.slice(-4).map((l, i) => <p key={i} className="truncate">{l}</p>)}
+                </div>
+              )}
+              {hqJob?.done && !hqJob.ok && (
+                <p className="text-[11px] text-red-300/70 mt-2 break-all">下载失败：{hqJob.error || '见日志'}</p>
+              )}
+            </>
+          ) : (
+            <button onClick={() => startSeparation()} disabled={busy}
+              className="w-full py-3 rounded-lg text-sm bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors disabled:opacity-50">
+              {busy ? '启动中…' : '人声 / 伴奏分离'}
+            </button>
+          )}
           {!stemStatus.available && (
             <p className="text-[11px] text-white/25 mt-2 leading-relaxed">
               需要后端安装 audio-separator：pip install audio-separator
@@ -228,7 +304,9 @@ export function FxPanel({ onClose, anchorRef }: {
               style={{ width: `${stemStatus.progress ?? 0}%` }} />
           </div>
           <p className="text-[11px] text-white/25 mt-2">
-            正在分离{stemStatus.quality === 'hq' ? '（高质量模型，耗时较长）' : ''}，可在后台等待，完成后自动可切换音轨
+            {(stemStatus.progress ?? 0) <= 12
+              ? '首次使用需要下载分离模型（约 66MB），进度会停在这一步一两分钟，属于正常现象'
+              : `正在分离${stemStatus.quality === 'hq' ? '（高质量模型，耗时较长）' : ''}，可在后台等待，完成后自动可切换音轨`}
           </p>
         </div>
       )}

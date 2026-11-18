@@ -8,6 +8,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { RefObject } from 'react';
 import { api } from '../api';
+import { DepsMissing } from './DepsMissing';
 import { usePlayer } from '../store';
 import type { MelodyData } from '../types';
 
@@ -42,6 +43,10 @@ export function MelodyPanel({ songId, songTitle, onClose, anchorRef }: {
 }) {
   const [data, setData] = useState<MelodyData | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+  // 旋律必须基于人声轨；没有时直接给"立即分离"，别让用户自己去翻「效果 → 音轨」。
+  const [stemsInfo, setStemsInfo] = useState<{ available: boolean; missing: string[]; status: string; progress: number } | null>(null);
+  const [sepBusy, setSepBusy] = useState(false);
   const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
   const [lineText, setLineText] = useState('');
   const [nowNote, setNowNote] = useState('');
@@ -76,10 +81,42 @@ export function MelodyPanel({ songId, songTitle, onClose, anchorRef }: {
     let alive = true;
     setData(null); setErr(null); rngRef.current = [0, 0];
     api.getMelody(songId)
-      .then(d => { if (alive) setData(d); })
+      .then(d => {
+        if (!alive) return;
+        setData(d);
+        if (d.status === 'no_vocals') {
+          api.getStems(songId)
+            .then(st => { if (alive) setStemsInfo({ available: st.available, missing: st.missing || [], status: st.status, progress: st.progress }); })
+            .catch(() => { if (alive) setStemsInfo(null); });
+        }
+      })
       .catch(e => { if (alive) setErr(String((e as Error).message || e)); });
     return () => { alive = false; };
-  }, [songId]);
+  }, [songId, reloadKey]);
+
+  /** 直接为当前歌排一次分离，完成后重新拉旋律 */
+  const separateNow = async () => {
+    if (sepBusy) return;
+    setSepBusy(true);
+    try {
+      await api.separateStems(songId, 'standard');
+      const timer = window.setInterval(async () => {
+        const st = await api.getStems(songId).catch(() => null);
+        if (!st) return;
+        setStemsInfo({ available: st.available, missing: st.missing || [], status: st.status, progress: st.progress });
+        if (st.status === 'ready') {
+          window.clearInterval(timer);
+          setSepBusy(false);
+          setReloadKey(k => k + 1);
+        } else if (st.status === 'error') {
+          window.clearInterval(timer);
+          setSepBusy(false);
+        }
+      }, 3000);
+    } catch {
+      setSepBusy(false);
+    }
+  };
 
   // 定位：水平居中，贴在播放栏上方
   useLayoutEffect(() => {
@@ -298,13 +335,51 @@ export function MelodyPanel({ songId, songTitle, onClose, anchorRef }: {
         </div>
       )}
 
+      {data?.status === 'missing_deps' && (
+        <DepsMissing
+          feature={(data as any).feature || 'melody'}
+          missing={data.missing || ['librosa']}
+          onDone={() => setReloadKey(k => k + 1)}
+        />
+      )}
+
       {data?.status === 'no_vocals' && (
-        <div className="h-[150px] flex flex-col items-center justify-center gap-2 text-center px-8">
-          <p className="text-[13px] text-white/60">这首歌还没有分离过人声</p>
-          <p className="text-[11px] text-white/30 leading-relaxed">
-            旋律必须基于人声轨才能算准（混音里会被贝斯带偏）。<br />
-            打开「效果 → 音轨」分离一次，再回来点这里。
-          </p>
+        <div className="min-h-[150px] flex flex-col items-center justify-center gap-2 text-center px-6">
+          {stemsInfo && !stemsInfo.available ? (
+            /* 分离组件都没装：先把环境装上（装完这里会自动重试） */
+            <DepsMissing
+              feature="stems"
+              missing={stemsInfo.missing.length ? stemsInfo.missing : ['torch', 'audio-separator']}
+              onDone={() => { setReloadKey(k => k + 1); }}
+            />
+          ) : sepBusy || stemsInfo?.status === 'processing' ? (
+            <>
+              <p className="text-[13px] text-white/60">正在分离人声…</p>
+              <div className="w-[220px] h-1.5 rounded-full bg-white/10 overflow-hidden">
+                <div className="h-full bg-[var(--accent)] transition-all duration-500"
+                  style={{ width: `${stemsInfo?.progress ?? 0}%` }} />
+              </div>
+              <p className="text-[11px] text-white/30">
+                {(stemsInfo?.progress ?? 0) <= 12
+                  ? '首次使用需要下载分离模型（约 66MB），可能停在这一步一两分钟'
+                  : '可以关掉面板去听歌，完成后回来点旋律即可'}
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-[13px] text-white/60">这首歌还没有分离过人声</p>
+              <p className="text-[11px] text-white/30 leading-relaxed">
+                旋律必须基于人声轨才能算准（混音里会被贝斯带偏）。
+              </p>
+              <button onClick={separateNow}
+                className="mt-1 px-3.5 py-1.5 rounded-lg text-xs bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors">
+                立即分离（后台进行）
+              </button>
+              <p className="text-[10px] text-white/20">
+                也可以在「效果 → 音轨」里手动选质量
+              </p>
+            </>
+          )}
         </div>
       )}
 

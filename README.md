@@ -2,14 +2,14 @@
 
 > 本地音乐播放器 · Electron 桌面端 + Web 网页端 · Apple Music 风格 · 桌面歌词悬浮窗
 
-一个基于 **Python FastAPI + React + Electron** 的本地音乐播放器，扫描本地 MP3 文件，自动提取 ID3 元数据/封面/歌词，提供完整的桌面端播放体验。
+一个基于 **Python FastAPI + React + Electron** 的本地音乐播放器：扫描本地 MP3，自动读取 ID3 封面与同名 LRC 歌词；支持收藏与歌单、拼音搜索、AI 相关视频检索、人声分离与旋律、系统媒体键，以及用 DeepSeek 给曲库做「音乐画像」。
 
 > 📖 **想改代码？** 看 [DEV_GUIDE.md](DEV_GUIDE.md) —— 逐文件讲解实现细节、数据流、设计决策与踩坑记录。本文档只讲"是什么、怎么跑"。
 
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9+-blue?logo=python" />
   <img src="https://img.shields.io/badge/React-19-61DAFB?logo=react" />
-  <img src="https://img.shields.io/badge/Electron-39-47848F?logo=electron" />
+  <img src="https://img.shields.io/badge/Electron-42-47848F?logo=electron" />
   <img src="https://img.shields.io/badge/FastAPI-0.115-teal?logo=fastapi" />
 </p>
 
@@ -22,9 +22,16 @@
 | 🎵 播放引擎 | MP3 流式播放（HTTP Range 请求 + 128KB 缓冲）、进度拖拽、音量调节/静音、音量记忆 |
 | 🔀 播放模式 | 顺序播放 / 列表循环 / 单曲循环 / 随机播放 · 模式记忆持久化 |
 | 🎛️ 音效引擎 | 倍速 0.5–2x · 升降 KEY ±12 半音 · 小黄人变声 · 参数持久化 |
+| 📚 收藏与歌单 | 「我喜欢」收藏 · 自建歌单（一首可进多个组）· 最近播放 500 条 · 底栏一键收藏 |
+| 📚 收藏与歌单 | 「我喜欢」收藏 · 自建歌单（一首可进多个组）· 最近播放 500 条 · 底栏一键收藏 |
 | 🎤 音轨切换 | 原唱 / 人声 / 伴奏三轨自由切换（AI 人声分离） · 切轨保留播放进度 |
 | 🔎 相关视频 | **双击歌名**搜这首歌（现场/翻唱/MV），**双击歌手名**搜这位歌手；两个面板互斥，B站+抖音直达链接 |
 | 👤 歌手简介 | 歌手页顶部显示中文简介 / 别名 / 粉丝数 / 作品数（网易云公开接口，免费无需 key） |
+| 🧩 功能组件 | 人声分离/旋律依赖的模型**不随程序下载**：旋律约 150MB、分离约 2.5GB，用到时点一下就装 |
+| 🎚 高质量分离 | 选「高质量」且模型未下载时，按钮直接变成「下载高质量模型（102MB）」，下完即用 |
+| 🔎 拼音搜索 | 歌名/歌手支持全拼与首字母（`zjl` → 周杰伦、`qt` → 晴天） |
+| 🧠 音乐画像 | 曲库风格饼图 / 偏好标签 / 常听歌手 / 「可能想听」推荐（DeepSeek 分批打标，增量缓存） |
+| 🎧 系统媒体控制 | 耳机线控 / 键盘媒体键控制播放；Win 音量条显示「正在播放」（封面+进度） |
 | 🎼 旋律 | 底栏「旋律」按钮 → 音高走向图（piano-roll + A4 音名），跟随播放滚动并高亮当前歌词 |
 | 🎨 皮肤 | 默认 / 海洋 / 森林三套，换的是主题色·弹层底色·按键·选中态，不只是背景图 |
 | 📝 歌词系统 | LRC 文件解析 · 全屏歌词滚动高亮 · 点击歌词行跳转 · 自动居中滚动 |
@@ -43,9 +50,9 @@
 
 <table>
 <tr>
-<td align="center"><b>🎵 主页</b><br/>全部歌曲 A-Z 排序 + 毛玻璃侧边栏</td>
-<td align="center"><b>📝 全屏歌词 & 桌面悬浮窗</b><br/>左封面 · 右歌词 · 左下角透明浮窗</td>
-<td align="center"><b>⚙️ 设置</b><br/>三区域背景切换 · 字体选择 · 歌词悬浮窗调色</td>
+<td align="center"><b>🎵 主页</b><br/>全部歌曲 A-Z · 收藏 / 最近 / 歌单 / 音乐画像</td>
+<td align="center"><b>📝 全屏歌词 & 桌面悬浮窗</b><br/>左封面 · 右歌词 · 左下角独立歌词窗</td>
+<td align="center"><b>⚙️ 设置</b><br/>皮肤 · 三区域背景 · 字体 · 悬浮窗调色</td>
 </tr>
 <tr>
 <td><img src="images/主页.png" alt="主页" width="100%" /></td>
@@ -99,7 +106,7 @@
 | **前端** | React 19 + TypeScript | 组件化开发，类型安全 |
 | **样式** | Tailwind CSS | 原子化 CSS，Apple Music 暗色风格 |
 | **动画** | Framer Motion | 列表入场动画、歌词过渡 |
-| **桌面壳** | Electron 39 | 跨平台桌面打包 + 原生透明歌词窗口 |
+| **桌面壳** | Electron 42 | 跨平台桌面打包 + 原生透明歌词窗口 |
 | **IPC** | Electron contextBridge | 安全进程间通信 |
 
 ---
@@ -372,50 +379,64 @@ GET /api/artist-info?name=周杰伦
 music-player/
 ├── start.bat                  # 网页版启动
 ├── start-desktop.bat          # 桌面版启动
-├── setup-first-run.bat        # 首次运行：安装 Python 依赖
+├── setup-first-run.bat        # 首次安装：建 .venv + 装依赖 + 可选建快捷方式
 ├── package.json               # Electron 入口
 ├── electron-builder.yml       # 打包配置
 │
 ├── backend/
 │   ├── main.py                # FastAPI 服务 (端口 8765)
-│   ├── scanner.py             # MP3 扫描 · ID3 解析 · 封面预提取
+│   ├── scanner.py             # MP3 扫描 · ID3 解析 · 封面预提取 · 拼音索引
 │   ├── lyrics.py              # LRC 歌词解析
-│   ├── models.py              # Pydantic 数据模型
+│   ├── library.py             # 收藏 / 歌单 / 最近播放（<音乐目录>/播放数据.json）
+│   ├── lyric_fetch.py         # 歌词补齐（网易云，只补缺失 + 时长校验）
+│   ├── deps.py                # 可选依赖探测与按需安装（pip / npm 两套安装器）
+│   ├── insights.py            # 曲库画像（分批打标 + 增量缓存 + 推荐校验）
+│   ├── melody.py              # 旋律提取（CREPE / pyin）
 │   ├── separator.py           # 人声/伴奏分离（任务管理 + 结果索引）
-│   ├── relinks.py             # 相关视频检索（B站 / 抖音 Tavily / DeepSeek 排序）
+│   ├── relinks.py             # 相关视频检索（B站 / 抖音 / DeepSeek 排序）
 │   ├── artist_info.py         # 歌手简介（网易云公开接口 + 落盘缓存）
-│   ├── setup_stem_models.py   # 高质量分离模型一键部署（下载 + PoPE 补丁）
-│   ├── config.json            # 配置文件（音乐目录路径，运行时可改）
-│   ├── requirements.txt       # Python 依赖
+│   ├── setup_stem_models.py   # 高质量分离模型部署（下载 + PoPE 补丁）
 │   ├── haizhe-backend.spec    # PyInstaller 打包配置
-│   ├── vendor/                # 可选依赖（audio-separator 等，按需安装）
-│   └── cache/covers/          # 封面缩略图磁盘缓存 (150px JPEG)
+│   ├── haizhe-backend.spec    # PyInstaller 打包配置
+│   ├── config.example.json    # 配置示例（config.json 首次运行生成，不入库）
+│   ├── requirements.txt       # 必需依赖
+│   ├── requirements-optional.txt  # 可选功能依赖（旋律 / 分离）
+│   └── tests/                 # pytest（22 例：解析 / 搜索 / 歌单 / 画像容错）
 │
 ├── frontend/
 │   ├── src/
 │   │   ├── main.tsx           # React 入口
 │   │   ├── App.tsx            # 路由 + 全局布局 + 背景初始化
 │   │   ├── store.tsx          # 播放器状态管理 (useReducer + Context)
+│   │   ├── libraryStore.tsx   # 收藏 / 歌单状态（跨页面同步）
 │   │   ├── fx.ts              # 音效引擎（倍速 / 升降 KEY / 小黄人）
+│   │   ├── pipLock.ts         # 桌面歌词锁定状态同步
 │   │   ├── api.ts             # 后端 API 调用
 │   │   ├── types.ts           # TypeScript 类型定义
 │   │   ├── components/
-│   │   │   ├── Sidebar.tsx    # 侧边栏导航
-│   │   │   ├── PlayerBar.tsx  # 底部播放栏 + 全屏歌词面板 + PiP 悬浮窗
+│   │   │   ├── Sidebar.tsx    # 侧边栏（收藏 / 最近 / 歌单 / 画像 / 搜索）
+│   │   │   ├── PlayerBar.tsx  # 播放栏 + 全屏歌词页 + 桌面歌词
 │   │   │   ├── FxPanel.tsx    # 音效面板（倍速/KEY/小黄人/音轨）
-│   │   │   ├── RelinkPanel.tsx # 相关视频面板（现场版/翻唱，双击歌名触发）
-│   │   │   ├── TitleBar.tsx   # 自定义标题栏（Electron 环境）
-│   │   │   └── FloatingLyrics.tsx  # 设置页悬浮窗预览
+│   │   │   ├── MelodyPanel.tsx      # 旋律钢琴卷帘
+│   │   │   ├── RelinkPanel.tsx      # 相关视频面板（双击歌名触发）
+│   │   │   ├── SongList.tsx / SongMenu.tsx  # 列表与行内菜单（多页面复用）
+│   │   │   ├── Onboarding.tsx       # 首次启动三步引导
+│   │   │   ├── DepsMissing.tsx      # 缺组件时的一键安装卡片
+│   │   │   ├── MediaSessionBridge.tsx  # 系统媒体键 / SMTC
+│   │   │   └── TitleBar.tsx         # 自定义标题栏（Electron 环境）
 │   │   └── pages/
 │   │       ├── AllSongsPage.tsx    # 全部歌曲（A-Z 分组）
 │   │       ├── ArtistsPage.tsx     # 歌手列表
 │   │       ├── ArtistSongsPage.tsx # 歌手歌曲
+│   │       ├── LibraryPage.tsx     # 我喜欢 / 最近播放 / 歌单
+│   │       ├── InsightsPage.tsx    # 音乐画像
 │   │       ├── SearchPage.tsx      # 搜索页
-│   │       └── SettingsPage.tsx    # 设置（曲库/背景/字体/悬浮窗）
-│   └── public/bg/
-│       ├── main/              # 主页背景图
-│       ├── sidebar/           # 侧边栏背景图
-│       └── player/            # 全屏播放页背景图
+│   │       └── SettingsPage.tsx    # 设置（曲库/组件/歌词/皮肤/背景/字体）
+│   └── public/bg/{main,sidebar,player}/   # 默认背景图
+│
+├── tools/
+│   ├── media-test.ps1         # 媒体会话检测 / 媒体键模拟
+│   └── fix-app-name.ps1       # 修复媒体卡片显示"未知应用"
 │
 ├── electron/
 │   ├── main.js                # Electron 主进程 · 窗口管理 · 子进程生命周期
@@ -433,86 +454,131 @@ music-player/
 ### 环境要求
 
 - **Python 3.9+**
-- **Node.js 18+**（仅桌面版需要）
+- **Node.js 18+**（桌面版必需）
 - **Windows / macOS / Linux**
 
-### 1. 安装依赖
+### 1. 一键安装（推荐）
+
+```
+双击 setup-first-run.bat
+```
+
+它会依次完成：
+
+1. 在项目目录建 `.venv` 虚拟环境（不污染系统 Python）
+2. 装后端依赖 `backend/requirements.txt`
+3. 装 Electron 与前端依赖（`npm install` + `frontend/npm install`）
+4. 生成 `backend/config.json`（若不存在）
+5. 询问是否创建桌面快捷方式
+
+国内网络会先问你「是否使用国内镜像」——pip 走清华源、npm 走 npmmirror、
+Electron 二进制走 npmmirror，能避开大部分下载卡住的问题。
+
+手动安装（等价）：
 
 ```bash
-# Python 依赖
-cd backend
-pip install -r requirements.txt
+python -m venv .venv
+.venv/Scripts/python.exe -m pip install -r backend/requirements.txt   # Windows
+# source .venv/bin/activate && pip install -r backend/requirements.txt  # macOS/Linux
 
-# Node 依赖（仅桌面版）
-cd ..
 npm install
+cd frontend && npm install
 ```
 
-### 1.5 可选功能：人声/伴奏分离（含 GPU 加速）
+### 2. 首次启动：三步向导
 
-分离功能基于开源 [audio-separator](https://github.com/karaokenerds/python-audio-separator)（UVR 模型），依赖装在项目本地 `backend/vendor/`，不污染系统环境：
+首次打开（曲库为空）会自动弹出向导：
 
-```bash
-cd backend
-# 基础（CPU 推理，标准质量）
-python -m pip install audio-separator==0.18.0 onnxruntime imageio-ffmpeg --target vendor
-```
+| 步骤 | 内容 | 必填 |
+|---|---|---|
+| 1/3 音乐目录 | 填路径或「浏览…」→ 保存并扫描，显示扫到多少首 | 是（可跳过） |
+| 2/3 AI 密钥 | DeepSeek 一个框即可；不填则相关视频只搜 B站 | 否 |
+| 3/3 完成 | 显示曲库数量 + 开始听歌 | — |
 
-**GPU 加速**（NVIDIA 显卡，推荐——高质量模型 BS PolarFormer 在 GPU 上约 30-60 秒/首，CPU 需 20-40 分钟）：
-
-```bash
-# CUDA 版 torch（2.8.0 + cu126，约 2.9GB 下载）
-python -m pip install torch==2.8.0 torchvision --index-url https://download.pytorch.org/whl/cu126 --target vendor
-```
-
-**高质量模型一键部署**（`backend/setup_stem_models.py`，幂等可重复运行）：
-
-```bash
-python backend/setup_stem_models.py
-```
-
-它会完成三件事：
-1. 给 audio-separator 打 PoPE 推理补丁（PolarFormer 使用极坐标位置编码，原库不支持）
-2. 下载 BS PolarFormer 权重（102MB，float16）与 yaml 到 `backend/cache/stem_models/`，带 sha256 校验
-3. 生成修正版 yaml（对齐 audio-separator 推理所需的 hop_length / inference / stem 命名）
-
-标准档 MDX23C 无需手动操作，首次分离时自动下载。模型为按需加载——只听原曲永远不会加载，首次点击分离时才下载/载入。
-
-**分离结果持久化**在 `<你的音乐目录>/人声分离/<歌曲文件名>_C/`（标准档）或 `_G/`（高质量档），目录内含 `vocals.flac` + `instrumental.flac` + `meta.json`。与曲库同处、随曲库迁移，可在设置页管理删除。
-
-- 标准：`MDX23C-8KFFT-InstVoc_HQ.ckpt`（MDX23C，2023，vocals SDR 11.95；CPU 约 5-15 分钟/首）
-- 高质量：`model_bs_polarformer_float16.ckpt`（BS PolarFormer，2025，Multisong vocals SDR 11.00，102MB，需 GPU + 上述脚本）
-
-### 2. 配置音乐目录
-
-启动后在「设置 → 音乐目录」里直接填写或浏览选择（推荐，实时生效并自动重扫）。
-
-或手动编辑 `backend/config.json`：
-
-```json
-{
-  "music_dir": "D:\\你的音乐文件夹"
-}
-```
-
-音乐目录下应有 `.mp3` 文件（封面和歌词会从同目录的 `.lrc` 文件和 MP3 ID3 标签中读取）。
+**跳过也没关系**：「全部歌曲」页会显示醒目的「设置音乐目录」按钮，
+随时可以从那里或设置页重新进入。
 
 ### 3. 启动
 
 ```bash
-# 网页版（PC + 手机均可访问）
-双击 start.bat
-# 或手动：
-cd backend && python main.py
-cd frontend && npx vite --host 0.0.0.0
+# 桌面版（推荐）：双击桌面「HaiZhe Music」快捷方式（无终端窗口）
+# 或调试：双击 start-desktop.bat（日志写入 desktop.log）
 
-# 桌面版（Electron，含透明悬浮窗）
-双击桌面快捷方式「HaiZhe Music」（推荐 · 无终端窗口启动）
-# 或调试时：双击 start-desktop.bat（输出写入 desktop.log）
+# 网页版：双击 start.bat
+#   - 已在运行的后端会被复用，不会去杀端口上的其它程序
+#   - 前端固定用项目内的 vite，不依赖全局 npx
 ```
 
 - **PC 访问**：`http://localhost:5173`
-- **手机访问**：`http://<你的电脑IP>:5173`（同 WiFi）
+- **手机访问**：`http://<你的电脑IP>:5173`（同 WiFi；需把 vite 的 `--host` 改为 `0.0.0.0`）
+
+### 4. 可选功能（默认不装）
+
+旋律、人声分离依赖较大的模型，**不随程序下载**，只听歌完全不需要：
+
+> 打开 **设置 → 🧩 功能组件**，缺什么点「安装」即可；装完自动重试，不用重启。
+
+| 功能 | 依赖 | 体积 |
+|---|---|---|
+| 旋律（音高走向图） | `librosa`（`torchcrepe` 为加速项） | 约 150MB |
+| 人声 / 伴奏分离 | `torch` + `audio-separator` | 约 2.5GB |
+| 拼音搜索 | `pypinyin` | 约 1MB（缺了会自动降级为中文搜索） |
+| 桌面模式（Electron） | `electron`（npm） | 约 120MB；只影响桌面壳，不装也能用浏览器版 |
+
+命令行安装：`pip install -r backend/requirements-optional.txt`
+
+**GPU 加速**（NVIDIA，高质量模型约 30-60 秒/首；CPU 需 20-40 分钟）：
+
+```bash
+.venv/Scripts/python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+```
+
+**高质量模型（BS PolarFormer 102MB）**：在「效果 → 音轨」选「高质量」时，
+若模型未下载，按钮会变成「下载高质量模型」，点一下即可（内置脚本，幂等）。
+命令行等价：`python backend/setup_stem_models.py`。
+
+分离结果持久化在 `<音乐目录>/人声分离/<文件名>_C|G/`，随曲库迁移。
+
+### 5. 国内网络：镜像切换
+
+一键安装脚本会询问，手动安装时可用：
+
+```bash
+# pip
+pip install -r backend/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# npm（含 Electron 二进制）
+set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+npm install --registry=https://registry.npmmirror.com
+```
+
+若 `node_modules/electron/dist/electron.exe` 不存在（二进制没下下来），
+重跑 `setup-first-run.bat` 或按上面设置 `ELECTRON_MIRROR` 后 `npm install electron`。
+
+### 6. 常见问题
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| 双击快捷方式黑屏 | 看 `logs/backend.log`，多半是解释器选错或后端依赖没装；重跑 `setup-first-run.bat` |
+| 只有浏览器版、没有桌面窗口 | Electron 二进制没下下来（受限网络常见）：设置 → 🧩 功能组件 → 「桌面模式（Electron）」→ 安装（自动走镜像） |
+| 曲库一直 0 首 | 目录里没有 mp3（会扫子目录）；确认后点列表页右上角「刷新」 |
+| 相关视频只有 B站 | 没配 DeepSeek key 时的正常降级 |
+| 旋律/分离提示缺组件 | 设置 → 🧩 功能组件 → 安装（见第 4 节） |
+
+---
+
+### 音乐画像（彩蛋）
+
+侧边栏「音乐画像」用 DeepSeek 给曲库打风格标签，汇总成风格占比饼图、偏好标签、
+常听歌手，并生成「可能想听」推荐。
+
+- **只上传歌名与歌手**，不上传音频、不上传文件路径
+- 曲库按 **45 首/批** 分批分析：740 首约 17 批、3–4 分钟，进度实时可见
+- 标签按歌曲 id **增量缓存**在 `<音乐目录>/曲库分析/标签.json`，
+  新增歌曲只补跑增量；分析中断也不会白跑（每批落盘一次）
+- 「可能想听」= 口味画像 + 随机场景主题 → 8 首候选 → **逐条到网易云校验**，
+  曲库里已有的歌会被过滤；点「换一批」换主题重生成
+- 没配 DeepSeek Key 时整块功能置灰，不影响播放；花费约几分钱/千首（按 DeepSeek 计费）
 
 ---
 

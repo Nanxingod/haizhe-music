@@ -2,9 +2,15 @@
 
 import { memo, useState, useEffect, useRef } from 'react';
 import { NavLink } from 'react-router-dom';
+import { useLibrary } from '../libraryStore';
 import { api } from '../api';
 
 export const Sidebar = memo(function Sidebar() {
+  const { playlists, favorites, newPlaylist } = useLibrary();
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState('');
+  const favCount = favorites.size;
+
   return (
     <aside className="w-[240px] h-full sidebar-bg flex flex-col shrink-0 max-lg:w-[64px] overflow-hidden">
       {/* Logo */}
@@ -52,6 +58,93 @@ export const Sidebar = memo(function Sidebar() {
           </svg>
           <span className="max-lg:hidden">歌手</span>
         </NavLink>
+
+        <NavLink
+          to="/favorites"
+          className={({ isActive }: { isActive: boolean }) =>
+            `flex items-center gap-3 px-4 py-3 rounded-xl text-[16px] font-medium transition-all duration-200 max-lg:justify-center max-lg:px-2 ${
+              isActive ? 'bg-white/12 text-white shadow-sm' : 'text-white/50 hover:text-white hover:bg-white/6'
+            }`
+          }
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round">
+            <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1-1.1a5.5 5.5 0 0 0-7.8 7.8l1.1 1L12 21l7.7-7.7 1.1-1a5.5 5.5 0 0 0 0-7.7z"/>
+          </svg>
+          <span className="max-lg:hidden">我喜欢</span>
+          {favCount > 0 && <span className="ml-auto text-[11px] text-white/25 max-lg:hidden">{favCount}</span>}
+        </NavLink>
+
+        <NavLink
+          to="/recent"
+          className={({ isActive }: { isActive: boolean }) =>
+            `flex items-center gap-3 px-4 py-3 rounded-xl text-[16px] font-medium transition-all duration-200 max-lg:justify-center max-lg:px-2 ${
+              isActive ? 'bg-white/12 text-white shadow-sm' : 'text-white/50 hover:text-white hover:bg-white/6'
+            }`
+          }
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+          </svg>
+          <span className="max-lg:hidden">最近播放</span>
+        </NavLink>
+
+        <NavLink
+          to="/insights"
+          className={({ isActive }: { isActive: boolean }) =>
+            `flex items-center gap-3 px-4 py-3 rounded-xl text-[16px] font-medium transition-all duration-200 max-lg:justify-center max-lg:px-2 ${
+              isActive ? 'bg-white/12 text-white shadow-sm' : 'text-white/50 hover:text-white hover:bg-white/6'
+            }`
+          }
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M4 19v-8M10 19V5M16 19v-6M22 19H2"/>
+          </svg>
+          <span className="max-lg:hidden">音乐画像</span>
+          <span className="ml-auto text-[9px] px-1.5 py-0.5 rounded bg-[var(--accent)]/15 text-[var(--accent)]/70 max-lg:hidden">新</span>
+        </NavLink>
+
+        {/* 歌单列表 */}
+        <div className="max-lg:hidden">
+          <div className="flex items-center justify-between px-4 pt-3 pb-1">
+            <span className="text-[11px] text-white/25 tracking-wide">歌单</span>
+            <button onClick={() => setCreating(v => !v)} title="新建歌单"
+              className="text-white/25 hover:text-white/70 transition-colors">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <path d="M12 5v14M5 12h14"/>
+              </svg>
+            </button>
+          </div>
+          {creating && (
+            <input
+              autoFocus value={newName} onChange={e => setNewName(e.target.value)}
+              onBlur={() => { setCreating(false); setNewName(''); }}
+              onKeyDown={async e => {
+                if (e.key === 'Enter' && newName.trim()) {
+                  await newPlaylist(newName.trim());
+                  setNewName(''); setCreating(false);
+                }
+                if (e.key === 'Escape') { setCreating(false); setNewName(''); }
+              }}
+              placeholder="歌单名，回车创建"
+              className="mx-3 mb-1 w-[calc(100%-1.5rem)] bg-black/30 border border-white/10 rounded-lg px-2 py-1.5 text-[12px] outline-none focus:border-[var(--accent)] placeholder:text-white/20"
+            />
+          )}
+          <div className="max-h-[30vh] overflow-y-auto">
+            {playlists.map(pl => (
+              <NavLink key={pl.id} to={`/playlist/${pl.id}`}
+                className={({ isActive }: { isActive: boolean }) =>
+                  `flex items-center gap-2 px-4 py-2 rounded-xl text-[13px] transition-colors ${
+                    isActive ? 'bg-white/10 text-white' : 'text-white/40 hover:text-white/80 hover:bg-white/5'
+                  }`}>
+                <span className="truncate">{pl.name}</span>
+                <span className="ml-auto text-[10px] text-white/20">{pl.count}</span>
+              </NavLink>
+            ))}
+            {playlists.length === 0 && (
+              <p className="px-4 py-1 text-[11px] text-white/15">点右上 + 新建</p>
+            )}
+          </div>
+        </div>
 
         <NavLink
           to="/search"

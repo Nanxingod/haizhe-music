@@ -1,6 +1,6 @@
 // Electron 主进程 - 海蜇音乐桌面版（V11 桌面体验优化版）
 const { app, BrowserWindow, ipcMain, shell, screen } = require('electron');
-const { spawn, exec, execSync, execFileSync } = require('child_process');
+const { spawn, exec, execSync, execFileSync, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -55,6 +55,9 @@ function logTo(fd, tag, msg) {
 // 找不到 python 就 spawn ENOENT，表现为「窗口打开但黑屏、后端根本没起」。
 // 这里按优先级探测，把实际用的是哪个写进日志。
 const PY_CANDIDATES = [
+  path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe'),   // 项目虚拟环境（README 推荐）
+  path.join(__dirname, '..', 'venv', 'Scripts', 'python.exe'),    // 兼容旧叫法
+  path.join(__dirname, '..', '.venv', 'bin', 'python'),           // 非 Windows 顺手支持
   'D:\\Anaconda\\python.exe',        // 本机后端依赖（fastapi/mutagen）装在这里
   'D:\\Anaconda3\\python.exe',
   path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Python', 'Python313', 'python.exe'),
@@ -66,16 +69,26 @@ const PY_CANDIDATES = [
 
 let cachedPython = null;
 
+/** 解释器能不能跑；needDeps=true 时顺带验证关键依赖在不在 */
+function pythonWorks(cand, needDeps) {
+  try {
+    execFileSync(cand, needDeps ? ['-c', 'import fastapi, uvicorn'] : ['-V'],
+                 { stdio: 'ignore', windowsHide: true, timeout: 8000 });
+    return true;
+  } catch { return false; }
+}
+
 function pickPython() {
   if (cachedPython) return cachedPython;
+  let alive = null;          // 能跑、但可能缺依赖
   for (const cand of PY_CANDIDATES) {
-    try {
-      execFileSync(cand, ['-V'], { stdio: 'ignore', windowsHide: true, timeout: 5000 });
-      cachedPython = cand;
-      return cand;
-    } catch { /* 试下一个 */ }
+    if (!pythonWorks(cand, false)) continue;
+    if (!alive) alive = cand;
+    if (pythonWorks(cand, true)) { cachedPython = cand; return cand; }
   }
-  cachedPython = 'python';   // 都没探到就交给 PATH，失败会在日志里留 spawn-error
+  // 没找到装齐依赖的解释器：返回"能跑的那个"，
+  // 让后端把 ModuleNotFoundError 写进 logs/backend.log（而不是连 ENOENT 都看不见）
+  cachedPython = alive || 'python';
   return cachedPython;
 }
 
@@ -83,8 +96,24 @@ function pickPython() {
 // 保证任务栏分组/图标正确（开发模式下不再显示 electron.exe 的默认图标）
 app.setAppUserModelId(APP_ID);
 
+// ⚡ V14.7: Windows 的媒体卡片（SMTC）/ 任务栏靠 AUMID 反查显示名。
+// 只调用 setAppUserModelId 而不注册的话，系统和用户看到的是"未知应用"。
+// 往 HKCU 写一条即可（不需要管理员），打包版有安装器时会自己注册。
+if (process.platform === 'win32') {
+  const regKey = `HKCU\\Software\\Classes\\AppUserModelId\\${APP_ID}`;
+  const setReg = (name, value) => {
+    execFile('reg', ['add', regKey, '/v', name, '/t', 'REG_SZ', '/d', value, '/f'],
+             { windowsHide: true }, () => { /* 失败不影响启动 */ });
+  };
+  setReg('DisplayName', '海蜇音乐');
+  setReg('IconUri', path.join(__dirname, 'icon.ico'));
+}
+
 // ⚡ 启用 Chromium 手动 GC（配合闲置 GC timer 释放 JS 堆碎片）
 // 注：GPU/图片内存靠后端封面缩放控制，不在此限制范围内
+// ⚡ V14.7: 让媒体键（耳机线控 / 键盘 ⏯⏭）经由 Chromium 的媒体会话处理，
+// 再由 Windows SMTC 路由到"当前活动的媒体应用"——不注册全局快捷键，不抢别人的键。
+app.commandLine.appendSwitch('enable-features', 'HardwareMediaKeyHandling,MediaSessionService');
 app.commandLine.appendSwitch('js-flags', '--expose-gc');
 
 // ── 单实例锁：重复启动时聚焦已有窗口，而不是再拉一套进程（桌面应用标准行为）──
@@ -165,6 +194,10 @@ function startBackend() {
     logTo(backendFd, '[env]', `python = ${ver}  (${py})`);
   } catch (e) {
     logTo(backendFd, '[env]', `python 不可用 (${py}): ${e.message}`);
+  }
+  if (!pythonWorks(py, true)) {
+    logTo(backendFd, '[env]',
+      `[!] ${py} 缺少 fastapi/uvicorn —— 跑 setup-first-run.bat，或用 .venv 安装后端依赖`);
   }
   const startedAt = Date.now();
   backendProc = spawn(py, ['main.py'], {
@@ -316,6 +349,19 @@ function createMainWindow() {
       mainWin.webContents.executeJavaScript('window.gc && window.gc()').catch(() => {});
     }
   }, 180000); // 每 3 分钟，且仅当窗口未聚焦时（不影响用户体验）
+
+  // ⚡ V14.7: 任务栏分组/跳转列表也用这个名字，否则显示 electron.exe
+  if (process.platform === 'win32') {
+    try {
+      mainWin.setAppDetails({
+        appId: APP_ID,
+        appIconPath: path.join(__dirname, 'icon.ico'),
+        appIconIndex: 0,
+        relaunchCommand: process.execPath,
+        relaunchDisplayName: '海蜇音乐',
+      });
+    } catch { /* 老版本不支持就算了 */ }
+  }
 
   mainWin.on('closed', () => {
     clearInterval(gcInterval);

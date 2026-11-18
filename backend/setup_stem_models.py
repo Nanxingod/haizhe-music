@@ -152,8 +152,15 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def download(url: str, dst: Path, expected_sha256: str) -> None:
-    """下载并校验 sha256；已存在且校验通过则跳过。"""
+def download(url: str, dst: Path, expected_sha256: str, skip_if_exists: bool = False) -> None:
+    """下载并校验 sha256；已存在且校验通过则跳过。
+
+    skip_if_exists: 给 yaml 用 —— fix_yaml() 会改写它，改完 sha 必然和原始值不同，
+    若仍按 sha 判断，每次运行都会重新下载一次（网络不通时直接失败）。
+    """
+    if skip_if_exists and dst.exists() and dst.stat().st_size > 0:
+        print(f"  ✓ {dst.name} 已存在，跳过下载（后续由 fix_yaml 校正）")
+        return
     if dst.exists() and sha256_file(dst) == expected_sha256:
         print(f"  ✓ {dst.name} 已存在且校验通过")
         return
@@ -458,7 +465,7 @@ def main():
     print("[1/3] 下载模型权重（102MB）")
     download(MODEL_URL, MODEL_DIR / f"{MODEL_NAME}.ckpt", MODEL_SHA256)
     print("[2/3] 下载模型配置 yaml")
-    download(YAML_URL, MODEL_DIR / f"{MODEL_NAME}.yaml", YAML_SHA256)
+    download(YAML_URL, MODEL_DIR / f"{MODEL_NAME}.yaml", YAML_SHA256, skip_if_exists=True)
 
     # 2) 补丁
     print("[3/3] 应用 audio-separator 补丁")

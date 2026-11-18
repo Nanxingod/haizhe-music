@@ -383,7 +383,7 @@ def search_douyin(keyword: str, limit: int = 6, hint: str = "") -> list[dict]:
 # ══════════════════════════════════════════════════════════════════
 
 def _chat(messages: list[dict], max_tokens: int = 900, timeout: int = 60,
-          effort: str = "low") -> str:
+          effort: str = "low", temperature: float = 0.2) -> str:
     """effort=low 是实测结论：归类同一批 17 条，default(high) 11.6s vs low 4.8s，
     输出长度与质量无差别。这个任务是简单分类，不值得让它深度思考。"""
     k = keys()["deepseek"]
@@ -393,7 +393,7 @@ def _chat(messages: list[dict], max_tokens: int = 900, timeout: int = 60,
         "model": DEEPSEEK_MODEL,
         "messages": messages,
         "response_format": {"type": "json_object"},
-        "temperature": 0.2,
+        "temperature": temperature,
         "max_tokens": max_tokens,
         "effort": effort,
     }, headers={"Authorization": f"Bearer {k}"}, timeout=timeout)

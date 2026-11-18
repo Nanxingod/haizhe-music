@@ -82,6 +82,7 @@ export const SettingsPage = memo(function SettingsPage() {
   const [uiFont, setUiFont] = useState(() => localStorage.getItem('haizhe-font-ui') || 'noto-sans');
   const [lyricsFont, setLyricsFont] = useState(() => localStorage.getItem('haizhe-font-lyrics') || 'noto-serif');
   const [headingFont, setHeadingFont] = useState(() => localStorage.getItem('haizhe-font-heading') || 'noto-sans');
+  const [fontMissing, setFontMissing] = useState<string[]>([]);
   // PiP 桌面歌词样式
   const [pipBg, setPipBg] = useState(() => Number(localStorage.getItem('haizhe-pip-bg') || 0.75));
   const [pipColor, setPipColor] = useState(() => localStorage.getItem('haizhe-pip-color') || '#ff9eaf');
@@ -95,6 +96,14 @@ export const SettingsPage = memo(function SettingsPage() {
   const [dirInput, setDirInput] = useState('');
   const [dirBusy, setDirBusy] = useState(false); // 保存中（含重扫）
   const [dirMsg, setDirMsg] = useState('');
+  const [rescanBusy, setRescanBusy] = useState(false);
+  const [rescanMsg, setRescanMsg] = useState('');
+  const [lyricMissing, setLyricMissing] = useState<number | null>(null);
+  const [lyricBusy, setLyricBusy] = useState(false);
+  const [lyricMsg, setLyricMsg] = useState('');
+  const [lyricFails, setLyricFails] = useState<string[]>([]);
+  const [depsInfo, setDepsInfo] = useState<any>(null);
+  const [depJob, setDepJob] = useState<any>(null);
   // AI 接口密钥（相关视频检索用）
   const [relinkCfg, setRelinkCfg] = useState<RelinkConfig | null>(null);
   const [dsKey, setDsKey] = useState('');
@@ -107,9 +116,15 @@ export const SettingsPage = memo(function SettingsPage() {
       .then((c: { music_dir: string; relink?: RelinkConfig }) => {
         setMusicDir(c.music_dir);
         setDirInput(c.music_dir);
-        setRelinkCfg(c.relink ?? { deepseek: false, tavily: false });
+        setRelinkCfg(c.relink ?? { deepseek: false, tavily: false, search: false });
       })
       .catch(() => {});
+  }, []);
+
+  // 打开设置页就探测一次组件状态：否则「功能组件」是一张空白卡，
+  // 用户得先点「检查组件状态」才知道缺什么。
+  useEffect(() => {
+    api.getDeps().then(setDepsInfo).catch(() => {});
   }, []);
 
   /** 保存 AI 接口密钥（只提交填了的那一项，留空表示不动） */
@@ -279,25 +294,56 @@ export const SettingsPage = memo(function SettingsPage() {
     localStorage.clear();
   };
 
+  // 检测字体是否真的加载成功：Google Fonts 被墙时会静默回退到系统字体，
+  // 用户会以为"切换无效"。这里给按钮标灰 + 一句提示。
+  useEffect(() => {
+    const check = () => {
+      const missing: string[] = [];
+      for (const f of FONT_OPTIONS) {
+        const fam = (f.css.match(/'([^']+)'/) || [])[1];
+        if (!fam) continue;
+        let ok: boolean;
+        try { ok = document.fonts.check(`16px "${fam}"`); } catch { ok = true; }
+        if (!ok) missing.push(f.id);
+      }
+      setFontMissing(missing);
+    };
+    check();
+    const t1 = window.setTimeout(check, 1500);
+    const t2 = window.setTimeout(check, 4000);
+    (document as any).fonts?.ready?.then(check).catch(() => {});
+    return () => { window.clearTimeout(t1); window.clearTimeout(t2); };
+  }, []);
+
   // 字体选择器组件
   const FontPicker = ({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) => (
     <div className="space-y-2">
       <p className="text-xs text-white/40">{label}</p>
       <div className="flex flex-wrap gap-1.5">
-        {FONT_OPTIONS.map(f => (
-          <button key={f.id}
-            onClick={() => onChange(f.id)}
-            className={`px-3 py-1.5 rounded-lg text-xs transition-all ${
-              value === f.id
-                ? 'bg-[var(--accent)]/15 text-[var(--accent)] border border-[var(--accent)]/25'
-                : 'bg-white/5 text-white/35 hover:bg-white/10 hover:text-white/55'
-            }`}
-            style={{ fontFamily: f.css }}
-          >
-            {f.preview}
-          </button>
-        ))}
+        {FONT_OPTIONS.map(f => {
+          const missing = fontMissing.includes(f.id);
+          return (
+            <button key={f.id}
+              onClick={() => onChange(f.id)}
+              title={missing ? '该字体未能加载（需要访问 Google Fonts），会回退到系统字体' : f.name}
+              className={`px-3 py-1.5 rounded-lg text-xs transition-all ${
+                value === f.id
+                  ? 'bg-[var(--accent)]/15 text-[var(--accent)] border border-[var(--accent)]/25'
+                  : 'bg-white/5 text-white/35 hover:bg-white/10 hover:text-white/55'
+              } ${missing ? 'opacity-45' : ''}`}
+              style={{ fontFamily: f.css }}
+            >
+              {f.preview}{missing ? ' ·' : ''}
+            </button>
+          );
+        })}
       </div>
+      {fontMissing.length > 0 && (
+        <p className="text-[11px] text-white/25 leading-relaxed">
+          有 {fontMissing.length} 款字体未能加载（需要联网访问 Google Fonts），选中后会回退到系统字体。
+          想彻底解决可以把字体文件放到本地，或改用可访问的 CDN。
+        </p>
+      )}
     </div>
   );
 
@@ -332,11 +378,154 @@ export const SettingsPage = memo(function SettingsPage() {
             </button>
           </div>
           {dirMsg && <p className={`text-xs ${dirMsg.startsWith('失败') ? 'text-red-300/70' : 'text-[var(--accent)]/80'}`}>{dirMsg}</p>}
+
+          {/* 重新扫描（加歌 / 加歌词后不用重启） */}
+          <div className="flex items-center gap-3 pt-1 border-t border-white/8">
+            <button
+              onClick={async () => {
+                setRescanBusy(true); setRescanMsg('');
+                try {
+                  const r = await api.refreshSongs();
+                  setRescanMsg(`已重新扫描：共 ${r.songs} 首${r.delta ? `（${r.delta > 0 ? '+' : ''}${r.delta}）` : ''}，${r.artists} 位歌手`);
+                } catch (e) {
+                  setRescanMsg('失败：' + String((e as Error).message || e));
+                } finally { setRescanBusy(false); }
+              }}
+              disabled={rescanBusy}
+              className="px-4 py-2 rounded-xl text-sm bg-white/5 text-white/60 hover:bg-white/10 hover:text-white transition-colors disabled:opacity-40">
+              {rescanBusy ? '扫描中…' : '重新扫描曲库'}
+            </button>
+            <p className="text-[11px] text-white/25 leading-relaxed">
+              加歌、加歌词（同名 .lrc）后点这里即可生效，<b className="text-white/40">不用重启</b>。
+            </p>
+          </div>
+          {rescanMsg && <p className={`text-xs ${rescanMsg.startsWith('失败') ? 'text-red-300/70' : 'text-[var(--accent)]/80'}`}>{rescanMsg}</p>}
           <p className="text-xs text-white/25 leading-relaxed">
             切换后立即重新扫描。人声分离结果保存在音乐目录下的「人声分离」文件夹，
             相关视频搜索结果保存在「相关视频」文件夹，歌手简介缓存在「歌手简介」文件夹，
             都会随曲库一起备份/迁移。
           </p>
+        </section>
+
+        {/* ═══ 功能组件（可选依赖）═══ */}
+        <section className="glass-light rounded-2xl p-5 space-y-3">
+          <h2 className="text-lg font-semibold">🧩 功能组件<span className="text-white/25 text-sm font-normal ml-2">按需安装</span></h2>
+          <p className="text-xs text-white/25 leading-relaxed">
+            Python 依赖（人声分离 / 旋律 / 拼音）默认<b className="text-white/40">不随程序下载</b>，
+            装在 <code className="text-white/40">{depsInfo?.deps_dir || '%LOCALAPPDATA%\\Haizhe\\deps'}</code>；
+            桌面模式组件（Electron）会装回项目的 <code className="text-white/40">node_modules</code>。
+            都是点一下就装，不影响正常播放。
+          </p>
+
+          {!depsInfo ? (
+            <button onClick={async () => { try { setDepsInfo(await api.getDeps()); } catch {} }}
+              className="px-4 py-2 rounded-xl text-sm bg-white/5 text-white/60 hover:bg-white/10 transition-colors">
+              检查组件状态
+            </button>
+          ) : (
+            <div className="space-y-1.5">
+              {depsInfo.features.map((f: any) => (
+                <div key={f.key} className="flex items-center gap-3 py-1.5 border-t border-white/6 first:border-0">
+                  <span className={`w-4 text-center ${f.installed ? 'text-[var(--accent)]' : 'text-white/20'}`}>
+                    {f.installed ? '✓' : '·'}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[13px] text-white/70">
+                      {f.name}
+                      {f.size_hint && <span className="ml-2 text-[10px] text-white/20">{f.size_hint}</span>}
+                    </p>
+                    <p className="text-[11px] text-white/25 truncate">{f.desc}</p>
+                    {f.kind === 'npm' && (
+                      <p className="text-[10px] text-white/20 mt-0.5">
+                        装到 {f.where} · 需要 Node.js 18+
+                      </p>
+                    )}
+                  </div>
+                  {f.installed ? (
+                    <span className="text-[11px] text-[var(--accent)]/60 shrink-0">已安装</span>
+                  ) : (
+                    <button
+                      onClick={async () => {
+                        try {
+                          await api.installDep(f.key);
+                          const t = setInterval(async () => {
+                            const j = await api.getDepJob().catch(() => null);
+                            if (j) setDepJob(j);
+                            if (j && !j.running) {
+                              clearInterval(t);
+                              setDepsInfo(await api.getDeps().catch(() => null));
+                            }
+                          }, 1200);
+                        } catch (e) { setDepJob({ error: String((e as Error).message || e) }); }
+                      }}
+                      disabled={!!depJob?.running}
+                      className="shrink-0 px-3 py-1.5 rounded-lg text-[12px] bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 disabled:opacity-40">
+                      安装
+                    </button>
+                  )}
+                </div>
+              ))}
+              <p className="text-[11px] text-white/20 pt-1">
+                依赖目录占用 {depsInfo.size_mb} MB
+                {depsInfo.legacy_dir ? '（含旧的 backend/vendor）' : ''}
+              </p>
+            </div>
+          )}
+
+          {depJob?.running && (
+            <div className="rounded-lg bg-black/30 p-2 max-h-28 overflow-y-auto font-mono text-[10px] text-white/40 space-y-0.5">
+              {(depJob.log || []).slice(-8).map((l: string, i: number) => <p key={i} className="truncate">{l}</p>)}
+            </div>
+          )}
+          {depJob && !depJob.running && depJob.done && (
+            <p className={`text-xs ${depJob.ok ? 'text-[var(--accent)]/80' : 'text-red-300/70'}`}>
+              {depJob.ok ? '安装完成，重启应用后生效' : '安装失败：' + (depJob.error || '见日志')}
+            </p>
+          )}
+        </section>
+
+        {/* ═══ 歌词补齐（备用）═══ */}
+        <section className="glass-light rounded-2xl p-5 space-y-3">
+          <h2 className="text-lg font-semibold">📝 歌词<span className="text-white/25 text-sm font-normal ml-2">备用</span></h2>
+          <p className="text-xs text-white/25 leading-relaxed">
+            从网易云按「歌名 + 歌手」匹配歌词，并用<b className="text-white/40">时长比对</b>排除 Live/翻唱版本（差 3 秒以上直接跳过）。
+            只会补<b className="text-white/40">没有歌词</b>的歌，已有歌词绝不覆盖。
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={async () => {
+                setLyricBusy(true); setLyricMsg(''); setLyricFails([]);
+                try {
+                  const r = await api.fetchMissingLyrics(20);
+                  setLyricMsg(`检查 ${r.checked} 首，补齐 ${r.filled} 首${r.remaining > 0 ? `，还剩 ${r.remaining} 首` : ''}`);
+                  const fails = (r.results || []).filter((x: any) => !x.ok)
+                    .map((x: any) => `${x.song}：${x.message}`);
+                  setLyricFails(fails);
+                  const m = await api.lyricsMissing();
+                  setLyricMissing(m.count);
+                } catch (e) {
+                  setLyricMsg('失败：' + String((e as Error).message || e));
+                } finally { setLyricBusy(false); }
+              }}
+              disabled={lyricBusy}
+              className="px-4 py-2 rounded-xl text-sm bg-white/5 text-white/60 hover:bg-white/10 hover:text-white transition-colors disabled:opacity-40">
+              {lyricBusy ? '匹配中…' : '自动补全缺失歌词'}
+            </button>
+            <button
+              onClick={async () => {
+                try { const m = await api.lyricsMissing(); setLyricMissing(m.count); }
+                catch { setLyricMissing(null); }
+              }}
+              className="px-3 py-2 rounded-xl text-xs bg-white/5 text-white/35 hover:bg-white/10 hover:text-white/60 transition-colors">
+              {lyricMissing === null ? '检查缺失数量' : `缺 ${lyricMissing} 首`}
+            </button>
+          </div>
+          {lyricMsg && <p className="text-xs text-[var(--accent)]/80">{lyricMsg}</p>}
+          {lyricFails.length > 0 && (
+            <ul className="text-[11px] text-amber-300/60 space-y-0.5 max-h-24 overflow-y-auto">
+              {lyricFails.map((f, i) => <li key={i}>· {f}</li>)}
+            </ul>
+          )}
         </section>
 
         {/* ═══ AI 接口密钥 ═══ */}

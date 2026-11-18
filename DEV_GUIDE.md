@@ -12,7 +12,7 @@
 |------|------|
 | [0. 阅读指南](#0-阅读指南) | 代码规模、阅读顺序、命名约定 |
 | [1. 整体架构与启动链路](#1-整体架构与启动链路) | 三进程模型、端口、一次启动发生了什么 |
-| [2. 后端 FastAPI](#2-后端-fastapi) | main / scanner / lyrics / models / separator / relinks / artist_info / setup_stem_models |
+| [2. 后端 FastAPI](#2-后端-fastapi) | main / scanner / lyrics / models / separator / relinks / artist_info / insights / setup_stem_models |
 | [3. 音效引擎 fx.ts](#3-音效引擎-fxts) | 两层架构、音质保护四条铁律 |
 | [4. 前端状态机 store.tsx](#4-前端状态机-storetsx) | reducer、副作用、切歌时序、四道防线 |
 | [5. 前端组件与页面](#5-前端组件与页面) | 组件树、FxPanel、背景与字体系统 |
@@ -404,6 +404,53 @@ PyInstaller 打包配置，把后端编成独立 `haizhe-backend.exe`（目标�
 `pending=True` + `_resume()` 续跑（`_jobs` 里已有任务则不重复排）。
 所以"中途退出"最多损失一次补齐，B站结果不会丢。
 
+**deps 有两类安装器（pip / npm）**：`FEATURES` 里用 `kind` 区分。
+Python 包走 `pip --target %LOCALAPPDATA%\Haizhe\deps`；
+Node 侧（目前只有 Electron 二进制）走 `npm install <pkg>@<package.json 里的范围> --no-save`，
+装回项目 `node_modules`。
+- npm **不能用 `shell=True`**：npm 常在 `C://Program Files\nodejs`，带引号的路径会被 cmd 剥引号；
+  改为 `node node_modules/npm/bin/npm-cli.js ...` 直接执行
+- `--no-save`：package.json 里本来就有 electron，补二进制不该改写版本范围
+- 打包版没有 package.json → `_applicable()` 返回 False，该组件在 UI 里直接不出现
+
+**可选依赖解耦**：`backend/deps.py` 把 torch / torchcrepe 这类重型包装到
+`%LOCALAPPDATA%\Haizhe\deps`，**不进源码树**；老机器的 `backend/vendor` 仍然优先生效（不强制迁移）。
+启动只做**能力探测**（`importlib.util.find_spec`，不执行包，避免 import torch 的 2 秒开销），
+缺什么就在设置页置灰；点「安装」走后台线程跑 pip（清华镜像），逐行读 stdout 做实时进度。
+**缺组件时怎么办**：业务接口不会 500，而是返回结构化状态——
+`melody.get()` 在入口先查 `deps.missing("melody")`，缺就返回
+`{status:"missing_deps", missing:[...]}`；`/api/stems` 与 `/api/stems/{id}` 也带 `missing` 字段。
+前端 `DepsMissing` 卡片据此给「下载并安装」，装完 `onDone()` 直接重试原请求（无需重启）。
+
+**分离的"三层就绪"要分清**：
+1. **包**（torch / audio-separator）——`deps.missing("stems")`
+2. **标准模型** —— audio-separator 首次 `load_model()` 时自动下载（约 66MB），
+   表现为进度停在 8% 一两分钟，前端要明确写出这句话，否则用户以为卡死
+3. **高质量模型**（PolarFormer 102MB）—— 不在 audio-separator 注册表里，
+   需要打 PoPE 补丁 + 下权重，由 `separator.prepare_hq()` 后台跑
+   `setup_stem_models.py`，前端 `/api/stems/{id}.hq_ready` 为 false 时
+   把「开始分离」换成「下载高质量模型」
+
+⚠️ `setup_stem_models.py` 的 yaml 下载必须用「存在即跳过」：`fix_yaml()` 会改写文件，
+改完 sha 和原始值不同，若按 sha 判断每次运行都会重下，网络不通时直接崩（踩过）。
+
+**必需 vs 可选**：`FEATURES` 里用 `required` 区分。melody 的 `librosa` 是必需，
+`torchcrepe` 只是加速项（没有就退 pyin），不能因为缺 torchcrepe 就把功能锁死。
+
+⚠️ 探测不能用 `import`：`import torch` 本身就是几百毫秒到几秒，启动时逐个探测会把冷启动拖垮。
+
+**歌词补齐**：`backend/lyric_fetch.py`，网易云免费接口。
+三个约束：只补缺失不覆盖、时长差 >3s 跳过（避开 Live/翻唱）、失败给可读原因。
+写入后就地更新内存里的 Song（lrc_path/has_lrc），省掉一次 10 秒全库重扫。
+
+**拼音搜索**：`scanner._PY_INDEX` 存每首歌的（歌名全拼、歌名首字母、歌手全拼、歌手首字母）。
+索引在 `scan_all()` 结束时预建（740 首约 0.2s），避免第一次搜索卡顿。
+`pypinyin` 装在 `backend/vendor`，scanner 顶部自己把 vendor 加进 sys.path；
+import 失败时 `_pinyin_of` 返回空串 → 自动退化为纯中文搜索，不影响启动。
+单字母查询不做拼音匹配（否则 `z` 会命中一大片）。
+
+**单测**：`cd backend && python -m pytest tests -q`（18 个，覆盖 LRC 解析/搜索/收藏歌单/历史的幂等与去重）。
+
 **两个维度（scope）**
 
 | scope | ident | 查询词来源 | 接口 | 落盘 |
@@ -702,6 +749,47 @@ key 本身就是歌手名，这点比 relinks 简单（那边 key 是 song_id，
 
 要点：**行高必须是固定值**（`--rowH`），字号变化只影响行内文字，不影响行高，
 否则动画过程中高度变化会抖。`busy` 标志防止快速换句时动画打架（只保留最后一次）。
+
+---
+
+### 2.x 曲库画像 `backend/insights.py`
+
+彩蛋功能，但工作流值得单独说明，因为「曲库很大」这个前提决定了所有设计。
+
+**分批 + 增量缓存**
+
+```
+读 <音乐目录>/曲库分析/标签.json  →  只挑没有标签的歌
+   → 每 45 首一个请求（序号|歌名|歌手，不带路径/音频）
+   → 解析成 {song_id: [标签]} → 立即原子写盘
+```
+
+- 45 首/批是实测值：输出约 700 token，不易被截断；740 首 = 17 批、约 204 秒
+- **每批写盘**：中断（关应用/断网）只损失当前批，下次接着跑
+- 标签按 `song_id` 存，曲库里删歌时自动丢弃无主标签
+- 换音乐目录后路径跟着变（`_dir()` 每次动态读 `scanner.MUSIC_DIR`）
+
+**标签词表约束**：不限定的话模型会输出「华语流行男声抒情」这种无法聚合的标签。
+固定 25 个词（流行/摇滚/…/其他），要求 1–3 个，聚合时按出现次数算占比。
+
+**模型输出不可信，解析必须容错**
+
+实测踩过两次：
+1. 字符串里出现未转义引号 → 整段 `json.loads` 崩
+2. **输出被截断**（停在 `"rea`）→ 如果按「最外层大括号闭合」提取，会一个对象都拿不到
+
+所以 `_objects()` 用**栈式**提取所有完整大括号块，再逐个解析/正则抠字段；
+推荐请求还做了「空响应 → 重试 → 短提示词降级」三级兜底。
+
+**推荐为什么要校验**
+
+LLM 会一本正经编出不存在的歌。流程是：
+口味画像 + 随机场景 → 8 首候选 → 网易云搜索（标题归一化 + 歌手重叠）
+→ 命中才给真实 `song/id` 和封面；没命中标记 `verified=false`，链接退化为搜索页。
+同时按「同名 + 歌手重叠」在本地过滤曲库已有的歌（提示词里的排除列表只是辅助）。
+
+**前端**：`InsightsPage.tsx` 只负责展示与轮询（3 秒一次，离开页面就停），
+饼图用 SVG `stroke-dasharray` 手写，不引图表库。
 
 ---
 
@@ -1264,6 +1352,31 @@ start.bat                     # 后端 :8765 + 前端 :5173
 # 桌面版调试（输出写入 desktop.log）
 start-desktop.bat
 ```
+
+### 9.1.1 前端类型检查：必须用 `tsc -b`，不能用 `tsc --noEmit`
+
+`frontend/tsconfig.json` 是 solution 风格——`"files": []` + references。
+在这种配置下 `tsc --noEmit` **什么都不检查**，永远返回 0；
+真正的检查在 `tsc -b`（项目引用模式）：
+
+```bash
+cd frontend
+npx tsc -b --force     # 全量；不加 --force 会吃 tsbuildinfo 缓存
+npm run build          # 等价于 tsc -b && vite build
+```
+
+2026-11-17 的部署事故就是这么来的：本地一直用 `--noEmit`"验证"，结果
+全新 clone 跑 `npm run build` 直接报 3 个错（`panel` 未定义、`currentSong` 可能为 null、
+relink 默认值缺 `search`），构建根本过不去。
+
+其他约定：
+
+- lint 只作参考，不阻塞构建。`eslint.config.js` 把最新预设里的风格类规则
+  （`no-explicit-any` / 空 catch / render 期读 ref / only-export-components）降到 warn 或 off，
+  真问题仍保持 error；目标是 `npx eslint .` 退出码 0。
+- 全新环境用项目内 `.venv`，不要再依赖系统 Python 或 Anaconda：
+  `setup-first-run.bat` 会建好，Electron 的 `pickPython()` 也把它排在候选首位，
+  并且会验证 `import fastapi, uvicorn` 是否真的可用（只验 `-V` 会选中一个空壳解释器）。
 
 ### 9.2 音效自检钩子
 

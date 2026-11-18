@@ -6,6 +6,11 @@ import { PlayerProvider } from './store';
 import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { PlayerBar } from './components/PlayerBar';
+import { MediaSessionBridge } from './components/MediaSessionBridge';
+import { LibraryProvider } from './libraryStore';
+import { LibraryPage } from './pages/LibraryPage';
+import { Onboarding } from './components/Onboarding';
+import { InsightsPage } from './pages/InsightsPage';
 import { bindPipLockSync } from './pipLock';
 import { AllSongsPage } from './pages/AllSongsPage';
 import { ArtistsPage } from './pages/ArtistsPage';
@@ -40,7 +45,7 @@ export function applyBgStyle(
   const filter = `brightness(${1 - adj.dim * 0.8}) contrast(${adj.contrast ?? 1})`
     + (adj.blur ? ` blur(${adj.blur}px)` : '');
 
-  let css = '';
+  let css: string;
   if (area === 'main') {
     css = `body::before { background-image: url('${url}') !important; filter: ${filter} !important; }`;
   } else if (area === 'sidebar') {
@@ -104,7 +109,10 @@ export default function App() {
   return (
     <BrowserRouter>
       <PlayerProvider>
+        <LibraryProvider>
         <BackgroundInit />
+        <MediaSessionBridge />
+        <Onboarding />
         <div className="h-full flex flex-col overflow-hidden">
           <TitleBar />
           <div className="flex flex-1 overflow-hidden relative">
@@ -115,6 +123,10 @@ export default function App() {
                 <Route path="/artists" element={<ArtistsPage />} />
                 <Route path="/artist/:name" element={<ArtistSongsPage />} />
                 <Route path="/search" element={<SearchPage />} />
+                <Route path="/favorites" element={<LibraryPage kind="favorites" />} />
+                <Route path="/recent" element={<LibraryPage kind="recent" />} />
+                <Route path="/playlist/:id" element={<LibraryPage kind="playlist" />} />
+                <Route path="/insights" element={<InsightsPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>
             </main>
@@ -123,6 +135,7 @@ export default function App() {
             <PlayerBar />
           </div>
         </div>
+        </LibraryProvider>
       </PlayerProvider>
     </BrowserRouter>
   );

@@ -1,113 +1,19 @@
 // 全部歌曲页 - 按歌名 A-Z 分组展示（V10.2 性能版）
 // 列表内容抽到独立 memo 组件，避免每 500ms timeupdate 触发 676 行全量重渲染
 
-import { useState, useEffect, memo, useMemo, useCallback } from 'react';
-import { motion } from 'framer-motion';
+import { useState, useEffect, memo, useCallback } from 'react';
 import type { Song } from '../types';
 import { api } from '../api';
 import { usePlayer } from '../store';
-import { CoverThumbnail } from '../components/Sidebar';
-
-function formatDuration(s: number | null): string {
-  if (!s) return '--:--';
-  const m = Math.floor(s / 60);
-  const sec = Math.floor(s % 60);
-  return `${m}:${sec.toString().padStart(2, '0')}`;
-}
-
-/* ── 歌曲列表内容（独立 memo，songId/isPlaying 不变时不重渲染）── */
-const SongListContent = memo(function SongListContent({
-  songs, currentSongId, isPlaying, onPlay,
-}: {
-  songs: Song[]; currentSongId: string | undefined; isPlaying: boolean;
-  onPlay: (song: Song) => void;
-}) {
-  const grouped = useMemo(() => {
-    const g: Record<string, Song[]> = {};
-    for (const s of songs) {
-      const first = s.title.charAt(0).toUpperCase();
-      const letter = /^[A-Z]$/.test(first) ? first : '#';
-      if (!g[letter]) g[letter] = [];
-      g[letter].push(s);
-    }
-    return g;
-  }, [songs]);
-
-  const letters = useMemo(() =>
-    Object.keys(grouped).sort((a, b) => {
-      if (a === '#') return 1;
-      if (b === '#') return -1;
-      return a.localeCompare(b);
-    })
-  , [grouped]);
-
-  return (
-    <div className="px-8 py-4 max-md:px-2">
-      {letters.map(letter => (
-        <div key={letter} className="mb-6">
-          <h2 className="text-xl font-bold text-white/12 mb-2 ml-2 sticky top-0 z-[5] py-1">{letter}</h2>
-          <div className="space-y-0.5">
-            {grouped[letter].map((song, i) => (
-              <SongRow
-                key={song.id}
-                song={song}
-                index={i}
-                isCurrent={song.id === currentSongId}
-                isPlaying={isPlaying && song.id === currentSongId}
-                onPlay={onPlay}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-});
-
-/* ── 单行（memo，song id 变了才重渲染）── */
-const SongRow = memo(function SongRow({
-  song, index, isCurrent, isPlaying, onPlay,
-}: {
-  song: Song; index: number; isCurrent: boolean; isPlaying: boolean; onPlay: (song: Song) => void;
-}) {
-  const handleClick = useCallback(() => onPlay(song), [onPlay, song]);
-  return (
-    <motion.div
-      initial={{ opacity: 0, x: -8 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ delay: Math.min(index * 0.005, 0.5) }}
-      onClick={handleClick}
-      className={`flex items-center gap-4 p-2.5 rounded-xl cursor-pointer transition-all duration-200 group hover:bg-white/5 ${
-        isCurrent ? 'bg-white/8' : ''
-      }`}
-    >
-      <div className="w-7 text-center shrink-0">
-        {isCurrent && isPlaying ? (
-          <div className="flex items-center justify-center gap-[2px] h-4">
-            <span className="w-[3px] bg-[var(--accent)] rounded-full animate-[eq_0.5s_ease-in-out_infinite]" style={{ height: 8, animationDelay: '0s' }} />
-            <span className="w-[3px] bg-[var(--accent)] rounded-full animate-[eq_0.5s_ease-in-out_infinite]" style={{ height: 14, animationDelay: '0.15s' }} />
-            <span className="w-[3px] bg-[var(--accent)] rounded-full animate-[eq_0.5s_ease-in-out_infinite]" style={{ height: 5, animationDelay: '0.3s' }} />
-          </div>
-        ) : (
-          <span className="text-xs text-white/15 group-hover:hidden">{index + 1}</span>
-        )}
-        <svg className="hidden group-hover:block w-3.5 h-3.5 mx-auto text-white/50" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-      </div>
-      <CoverThumbnail songId={song.id} size={38} />
-      <div className="min-w-0 flex-1">
-        <p className={`text-sm font-medium truncate ${isCurrent ? 'text-[var(--accent)]' : ''}`}>{song.title}</p>
-        <p className="text-xs text-white/25 truncate">{song.artist}</p>
-      </div>
-      <span className="text-xs text-white/15 shrink-0 max-md:hidden">{formatDuration(song.duration)}</span>
-    </motion.div>
-  );
-});
+import { SongListContent } from '../components/SongList';
+import { OPEN_ONB_EVENT, LIB_EVENT } from '../components/Onboarding';
 
 /* ── 页面外壳（处理加载/刷新，不随 timeupdate 重渲染列表）── */
 export const AllSongsPage = memo(function AllSongsPage() {
   const [songs, setSongs] = useState<Song[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const { play, state } = usePlayer();
 
   useEffect(() => {
@@ -128,6 +34,13 @@ export const AllSongsPage = memo(function AllSongsPage() {
     };
     load();
     return () => { cancelled = true; };
+  }, [reloadKey]);
+
+  // 引导里设完目录 / 别处重扫后广播 → 这里重新拉一次，不用刷新页面
+  useEffect(() => {
+    const reload = () => setReloadKey(k => k + 1);
+    window.addEventListener(LIB_EVENT, reload);
+    return () => window.removeEventListener(LIB_EVENT, reload);
   }, []);
 
   const handleRefresh = async () => {
@@ -173,6 +86,22 @@ export const AllSongsPage = memo(function AllSongsPage() {
               <div className="flex-1 space-y-2"><div className="skeleton h-4 w-48 rounded" /><div className="skeleton h-3 w-24 rounded" /></div>
             </div>
           ))}
+        </div>
+      ) : songs.length === 0 ? (
+        /* 空曲库：新用户第一眼看到的就是这里，必须给出下一步动作 */
+        <div className="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
+          <div className="w-12 h-12 rounded-2xl bg-white/5 flex items-center justify-center text-white/25 text-xl">♪</div>
+          <p className="text-[15px] text-white/70">曲库还是空的</p>
+          <p className="text-[12px] text-white/35 leading-relaxed max-w-[400px]">
+            把 mp3 放进一个文件夹，然后设置音乐目录 —— 会自动扫描子目录，
+            并读取同名的 .lrc 歌词文件。
+          </p>
+          <button
+            onClick={() => window.dispatchEvent(new Event(OPEN_ONB_EVENT))}
+            className="mt-1 px-4 py-2 rounded-xl text-[13px] bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 transition-colors">
+            设置音乐目录
+          </button>
+          <p className="text-[11px] text-white/20">已经放过歌了？点右上角「刷新」重新扫描</p>
         </div>
       ) : (
         <SongListContent
