@@ -33,6 +33,8 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 SEARCH_API = "https://music.163.com/api/search/get?s={}&type=100&limit=5"
 DETAIL_API = "https://music.163.com/api/v1/artist/{}"
+# V15.5：v1/artist 的 briefDesc 现在恒为空（2026-11 实测），简介只剩这个接口给
+INTRO_API = "https://music.163.com/api/artist/introduction?id={}"
 
 DIR_NAME = "歌手简介"
 MEM_MAX = 8
@@ -101,13 +103,43 @@ def search_artist(name: str) -> dict | None:
     return pick
 
 
+def _intro_text(data: dict) -> str:
+    """从 introduction 接口取简介：优先 briefDesc，空了再拼结构化段落"""
+    brief = _clean_brief(data.get("briefDesc") or "")
+    if len(brief) >= 40:
+        return brief
+    parts: list[str] = []
+    for sec in (data.get("introduction") or []):
+        if isinstance(sec, dict):
+            txt = str(sec.get("txt") or "").strip()
+            if txt:
+                parts.append(txt)
+    merged = _clean_brief(" ".join(parts))
+    return merged or brief
+
+
 def fetch_detail(artist_id: int) -> dict | None:
+    """基础信息（名字/头像/作品数）来自 v1/artist，简介来自 introduction。
+
+    两件事分开的原因：v1 返回的 briefDesc 已经是空串（2026-11 实测），
+    而 introduction 不带 name/picUrl，只能合起来用。
+    """
+    base: dict | None = None
     try:
         d = _get_json(DETAIL_API.format(artist_id))
+        base = d.get("artist") or None
     except Exception as e:
         print(f"[Artist] 详情失败({artist_id}): {e}")
-        return None
-    return d.get("artist") or None
+
+    try:
+        intro = _get_json(INTRO_API.format(artist_id))
+        text = _intro_text(intro or {})
+        if text:
+            base = dict(base or {})
+            base["briefDesc"] = text
+    except Exception as e:
+        print(f"[Artist] 简介接口失败({artist_id}): {e}")
+    return base
 
 
 # ── 缓存 ─────────────────────────────────────────────────────────

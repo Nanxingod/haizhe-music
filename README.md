@@ -401,7 +401,7 @@ music-player/
 │   ├── config.example.json    # 配置示例（config.json 首次运行生成，不入库）
 │   ├── requirements.txt       # 必需依赖
 │   ├── requirements-optional.txt  # 可选功能依赖（旋律 / 分离）
-│   └── tests/                 # pytest（22 例：解析 / 搜索 / 歌单 / 画像容错）
+│   └── tests/                 # pytest（34 例：解析 / 搜索 / 歌单 / 画像容错 / 依赖路径）
 │
 ├── frontend/
 │   ├── src/
@@ -520,24 +520,68 @@ cd frontend && npm install
 
 | 功能 | 依赖 | 体积 |
 |---|---|---|
-| 旋律（音高走向图） | `librosa`（`torchcrepe` 为加速项） | 约 150MB |
-| 人声 / 伴奏分离 | `torch` + `audio-separator` | 约 2.5GB |
-| 拼音搜索 | `pypinyin` | 约 1MB（缺了会自动降级为中文搜索） |
+| 旋律（音高走向图） | `librosa`（`torchcrepe` 为加速项） | 约 150MB（不含 torch） |
+| 人声 / 伴奏分离 | `torch` + `audio-separator` | 约 2.5GB（CPU 版约 200MB） |
 | 桌面模式（Electron） | `electron`（npm） | 约 120MB；只影响桌面壳，不装也能用浏览器版 |
 
-命令行安装：`pip install -r backend/requirements-optional.txt`
-
-**GPU 加速**（NVIDIA，高质量模型约 30-60 秒/首；CPU 需 20-40 分钟）：
+**一个入口，两边一致**。界面按钮和命令行都走同一个安装器：
 
 ```bash
-.venv/Scripts/python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu126
+python backend/deps.py status          # 看组件状态、GPU / torch 实际版本、磁盘占用
+python backend/deps.py install stems --cuda   # CUDA 版（N 卡）
+python backend/deps.py install stems --cpu    # CPU 版（体积小、慢 10-30 倍）
+python backend/deps.py install melody
+python backend/deps.py clean stems     # 清分离结果缓存
 ```
+
+**为什么必须选 CPU / CUDA**：Windows 上从 PyPI（以及清华等镜像）拿到的 torch
+**一定是 CPU 版**，CUDA 版只在 `download.pytorch.org`。不区分就会出现
+"装好了、界面显示已安装，但 `torch.cuda.is_available()` 永远 False"。
+安装器会在装完回读真实版本，装错变体会直接报错而不是静默通过。
+
+**依赖装在哪（它不是虚拟环境）**：默认 `%LOCALAPPDATA%\Haizhe\deps`，
+是一个用 `pip --target` 写入的**裸目录**，后端启动时挂到 `sys.path`。
+它没有独立的 `python.exe`，也不做环境隔离 —— 别的项目看不到它，
+`pip list` 也列不出来。想换位置（比如 D 盘）：
+
+```bash
+python backend/deps.py dir D:\Haizhe\deps    # 写入 config.json，重启后端生效
+# 或设环境变量 HAIZHE_DEPS_DIR，优先级更高
+```
+
+换目录**不会自动搬运**已装的包；要么重装，要么手动移动整个目录后改配置。
+
+**GPU 加速**（NVIDIA，高质量模型约 30-60 秒/首；CPU 需 20-40 分钟）：
+按上面 `--cuda` 安装即可。已经装错的，重新执行一次 `install ... --cuda` 会覆盖。
 
 **高质量模型（BS PolarFormer 102MB）**：在「效果 → 音轨」选「高质量」时，
 若模型未下载，按钮会变成「下载高质量模型」，点一下即可（内置脚本，幂等）。
 命令行等价：`python backend/setup_stem_models.py`。
 
 分离结果持久化在 `<音乐目录>/人声分离/<文件名>_C|G/`，随曲库迁移。
+
+### 4.1 磁盘占用：什么在 C 盘，什么在 D 盘
+
+这个项目**默认只把极小的东西放 C 盘**，重型文件都在你自己的目录里：
+
+| 位置 | 典型大小 | 说明 |
+|---|---|---|
+| `%APPDATA%\haizhe-music` | 约 100MB | Electron 缓存（Cache / Code Cache / GPUCache），可再生 |
+| `%LOCALAPPDATA%\Haizhe\deps` | 0 ~ 2.6GB | **只有点「安装」才会出现**；可用下面的配置改到 D 盘 |
+| `<项目>\backend\vendor` | 历史遗留，最大 7GB | 老版本 `pip --target` 装的，可删（删了相关功能会要求重装） |
+| `<项目>\backend\cache` | 约 800MB | 高质量分离模型（771MB）+ 封面缩略图 |
+| `<音乐目录>\人声分离` 等 | 随使用增长 | 分离结果 / 旋律 / 画像，跟着曲库走 |
+
+想彻底不让依赖落 C 盘：
+
+```bash
+python backend/deps.py dir D:\Haizhe\deps    # 写进 config.json，重启后端生效
+```
+
+> 只有 `deps_dir` 指向的位置会收到 pip 安装的包；`backend/vendor` 是历史目录，
+> 存在时仍会优先生效（不强制迁移）。
+
+---
 
 ### 5. 国内网络：镜像切换
 
@@ -563,7 +607,10 @@ npm install --registry=https://registry.npmmirror.com
 | 只有浏览器版、没有桌面窗口 | Electron 二进制没下下来（受限网络常见）：设置 → 🧩 功能组件 → 「桌面模式（Electron）」→ 安装（自动走镜像） |
 | 曲库一直 0 首 | 目录里没有 mp3（会扫子目录）；确认后点列表页右上角「刷新」 |
 | 相关视频只有 B站 | 没配 DeepSeek key 时的正常降级 |
+| 歌手简介空白 | 少数歌手（如陈粒）官方就是空的；配了 DeepSeek key 会用 AI 补一段并标注 |
 | 旋律/分离提示缺组件 | 设置 → 🧩 功能组件 → 安装（见第 4 节） |
+| 有 N 卡但分离很慢 | 装成了 CPU 版 torch：设置 → 功能组件 顶部会显示「当前是 CPU 版」，重装选 CUDA 版 |
+| 想给依赖换个盘 | `python backend/deps.py dir D:\Haizhe\deps`，重启后端 |
 
 ---
 

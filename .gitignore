@@ -2,6 +2,7 @@
 node_modules/
 .venv/
 venv/
+.deps/
 frontend/node_modules/
 
 # ── Python 运行时 ──

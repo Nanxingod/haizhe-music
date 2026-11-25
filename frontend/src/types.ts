@@ -257,3 +257,76 @@ export interface InsightsState {
   stale: boolean;
   songs: number;
 }
+
+/** V15.5: 可选依赖（设置 → 功能组件） */
+export interface DepsFeature {
+  key: string;
+  name: string;
+  desc: string;
+  heavy: boolean;
+  kind: 'pip' | 'npm';
+  where: string;
+  size_hint: string;
+  packages: string[];
+  missing: string[];
+  optional_missing: string[];
+  installed: boolean;
+  needs_torch: boolean;
+  versions?: Record<string, string>;
+  version_warn?: string;
+}
+
+export interface DepsUsage {
+  key: string;
+  label: string;
+  path: string;
+  size_mb: number;
+  cleanable: boolean;
+}
+
+export interface TorchState {
+  installed: boolean;
+  version: string;
+  cuda: boolean;
+  cuda_version: string;
+  file: string;
+  where: string;
+  error: string;
+  probed: boolean;
+}
+
+export interface GpuInfo {
+  available: boolean;
+  name: string;
+  memory_mb: number;
+  driver: string;
+  count: number;
+}
+
+export interface DepsInfo {
+  deps_dir: string;
+  deps_dir_source: 'env' | 'config' | 'default';
+  default_deps_dir: string;
+  legacy_dir: string;
+  deps_dir_exists: boolean;
+  size_mb: number;
+  gpu: GpuInfo;
+  torch: TorchState;
+  torch_ok: boolean | null;
+  usage: DepsUsage[];
+  features: DepsFeature[];
+}
+
+export interface DepJob {
+  running: boolean;
+  feature: string;
+  /**
+   * torch 变体：cuda 走 download.pytorch.org，cpu 走镜像。
+   * 注意看**变体**而不是安装完成，否则会误以为 GPU 可用。
+   */
+  variant?: 'cpu' | 'cuda' | '';
+  log: string[];
+  done: boolean;
+  ok: boolean;
+  error: string;
+}

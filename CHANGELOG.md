@@ -4,6 +4,43 @@
 
 ---
 
+## V15.5 — 2026-11-25
+
+### 🧱 依赖安装的标准化
+
+来自 OPTIMIZATION_REVIEW 的 P0 部分。核心问题：**功能上有 GPU 算法，产品上默认拿不到 GPU**。
+
+- **统一入口**：新增 `python backend/deps.py status|install|clean|dir`，
+  界面按钮与 README 都指向它，消除「界面装到 deps、命令行装到 .venv」的分裂
+- **CPU / CUDA 分流**：装 torch 前探测 `nvidia-smi`；CUDA 走
+  `download.pytorch.org/whl/cu126`，其余包走镜像，拆成两条 pip 命令
+  （一条命令不能同时用两个 index）
+- **装完回读真实状态**：子进程 `import torch` 取 `__version__` / `cuda_available`，
+  变体不符直接报错；`pip 成功 ≠ 拿到想要的 wheel`
+- **版本校验**：torch 主版本 < 2.0 时明确提示，不再静默跑失败
+- **`/api/deps` 扩展**：`gpu`、`torch`（版本/位置/是否 CUDA）、`deps_dir_source`、
+  磁盘账本 `usage`（deps / 旧 vendor / HQ 权重 / 分离结果 / 旋律 / 画像 / 封面）
+- **依赖目录可配置**：`HAIZHE_DEPS_DIR` 环境变量或 `config.json` 的 `deps_dir`；
+  默认仍是 `%LOCALAPPDATA%`（免管理员、按用户隔离）
+- **缓存清理**：`/api/deps/clean` 只清可再生缓存（分离结果/旋律/画像/封面），
+  带路径白名单校验
+- **拼合 pypinyin 身份**：它是 1MB 的基础依赖，从「功能组件」列表移除，不再重复出现
+
+### 🩹 顺带修复
+
+- **歌手简介失效**：网易云 `v1/artist` 的 `briefDesc` 现在恒为空（2026-11 实测），
+  改走 `/api/artist/introduction?id=`，周杰伦可拿到 665 字官方简介；
+  仍为空（如陈粒）则按原逻辑用 AI 补并打标
+
+### 🧹 工程健康
+
+- FastAPI `@app.on_event` → `lifespan`（合并两个 startup，减少弃用告警）
+- 前端按路由 code split：主包 **618KB → 431KB**，不再触发 500KB 警告
+- `package.json` 版本对齐到 15.5.0
+- 新增 `tests/test_deps.py` 12 例（命令分片 / 变体选择 / 目录优先级 / 版本读取 / 清理白名单）
+
+---
+
 ## V15.4 — 2026-11-17
 
 ### 📦 组件补齐全部一键（deps 支持 npm）

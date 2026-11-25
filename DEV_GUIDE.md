@@ -413,6 +413,41 @@ Node 侧（目前只有 Electron 二进制）走 `npm install <pkg>@<package.jso
 - `--no-save`：package.json 里本来就有 electron，补二进制不该改写版本范围
 - 打包版没有 package.json → `_applicable()` 返回 False，该组件在 UI 里直接不出现
 
+**四条安装路径曾经互相打架（V15.5 统一）**：改之前存在四个落点——
+
+| 入口 | 实际落点 | 后果 |
+|---|---|---|
+| `setup-first-run.bat` | `.venv\Lib\site-packages` | 基础依赖，正常 |
+| 界面「安装」 | `%LOCALAPPDATA%\Haizhe\deps` | 与 .venv 物理分离 |
+| README 命令行 | 当前 shell 的 pip（未激活 venv 就是全局） | 后端根本找不到 |
+| README GPU 命令 | `.venv` | 装了 CUDA 版也不生效 |
+
+现在统一成 `python backend/deps.py install <feature>`，界面按钮只是它的 HTTP 外壳。
+`deps_dir` 支持 `HAIZHE_DEPS_DIR` 环境变量与 `config.json` 的 `deps_dir` 覆盖。
+
+⚠️ **`sys.path` 有优先级**：`ensure_path()` 把 deps 目录 `insert(0)`，
+所以 deps 里的包会**遮蔽** `.venv` 里的同名包。切换目录时必须把旧路径移出
+`sys.path`（见 `_injected` 的处理），否则「.venv 装了 CUDA torch 却被 deps 的 CPU 版抢先」
+会极难排查。项目本机就真实出现过：torch 2.8.0+cu126 在 `backend/vendor`，
+`deps` 目录是空的——旧目录仍在生效。
+
+**CPU / CUDA 必须分流**：Windows 上 PyPI 的 torch wheel 是 CPU-only，
+CUDA 版只在 `download.pytorch.org/whl/cu126`。而一条 pip 命令不能同时用两个 index，
+所以 `_pip_cmds()` 把安装拆成两段：
+
+```
+1) torch            --index-url https://download.pytorch.org/whl/cu126
+2) 其余包（含 torchcrepe）  -i 清华镜像
+```
+
+先装 torch 再装其余包，torchcrepe 就不会从镜像把 CPU 版拖进来覆盖。
+装完必须**回读真实状态**（子进程 `import torch`），
+`pip 成功 ≠ 拿到想要的变体`；变体不符直接报错，不静默通过。
+
+**探测放在子进程**：`torch_state()` 用 `sys.executable -c` 跑探针，
+避免 import torch 的 1–2 秒和几百 MB 常驻内存拖慢后端；
+打包版（`sys.frozen`）里 `-c` 不可用，直接跳过并说明原因。
+
 **可选依赖解耦**：`backend/deps.py` 把 torch / torchcrepe 这类重型包装到
 `%LOCALAPPDATA%\Haizhe\deps`，**不进源码树**；老机器的 `backend/vendor` 仍然优先生效（不强制迁移）。
 启动只做**能力探测**（`importlib.util.find_spec`，不执行包，避免 import torch 的 2 秒开销），
@@ -1363,6 +1398,13 @@ start-desktop.bat
 cd frontend
 npx tsc -b --force     # 全量；不加 --force 会吃 tsbuildinfo 缓存
 npm run build          # 等价于 tsc -b && vite build
+```
+
+依赖相关改动额外跑：
+
+```bash
+python backend/deps.py status                  # GPU / torch 实际生效版本 / 磁盘账本
+python backend/deps.py install melody --cpu    # 小包可以真装一次验证链路
 ```
 
 2026-11-17 的部署事故就是这么来的：本地一直用 `--noEmit`"验证"，结果

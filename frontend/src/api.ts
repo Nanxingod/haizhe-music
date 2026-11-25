@@ -1,6 +1,6 @@
 // 音乐播放器 - API 客户端
 
-import type { Song, Artist, Lyrics, SearchResult, StemStatus, StemItem, StemQuality, RelinkResult, ArtistInfo, MelodyData, LibrarySummary, LibraryList, InsightsState, InsightPick } from './types';
+import type { Song, Artist, Lyrics, SearchResult, StemStatus, StemItem, StemQuality, RelinkResult, ArtistInfo, MelodyData, LibrarySummary, LibraryList, InsightsState, InsightPick, DepsInfo, DepJob } from './types';
 
 // ⚡ V13.2: Electron 桌面端直连后端，不再依赖 Vite 的 proxy。
 // 起因是一次真实故障：Vite(5173) 进程意外退出后，渲染进程所有 /api 请求全部
@@ -78,9 +78,16 @@ export const api = {
     fetch(`${BASE}/api/refresh`, { method: 'POST' }).then(r => r.json()),
 
   // V15: 可选依赖（能力探测 + 按需安装）
-  getDeps: () => fetchJSON<any>(`${BASE}/api/deps`),
-  installDep: (feature: string) => postJSON<{ started: boolean }>(`${BASE}/api/deps/install`, { feature }),
-  getDepJob: () => fetchJSON<any>(`${BASE}/api/deps/job`),
+  getDeps: () => fetchJSON<DepsInfo>(`${BASE}/api/deps`),
+
+  /** variant: auto（默认，有 N 卡走 CUDA）| cpu | cuda */
+  installDep: (feature: string, variant: 'auto' | 'cpu' | 'cuda' = 'auto') =>
+    postJSON<{ started: boolean; variant: string }>(`${BASE}/api/deps/install`, { feature, variant }),
+  getDepJob: () => fetchJSON<DepJob>(`${BASE}/api/deps/job`),
+
+  /** 清理可再生缓存：stems | melody | insights | covers */
+  cleanDep: (target: string) =>
+    postJSON<{ ok: boolean; freed_mb: number; path: string }>(`${BASE}/api/deps/clean`, { target }),
 
   // V15: 歌词补齐（备用，只补缺失）
   lyricsMissing: () =>

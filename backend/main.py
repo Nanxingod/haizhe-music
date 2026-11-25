@@ -3,7 +3,9 @@
 import os
 import re
 import gc
+import asyncio
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse, FileResponse, Response
@@ -25,7 +27,41 @@ import library as lib_mod
 import lyric_fetch as lyric_mod
 import insights as insights_mod
 
-app = FastAPI(title="小海蜇音乐播放器", version="2.2.0")
+ALL_SONGS: list[Song] = []
+ARTISTS: list[Artist] = []
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """启动/关闭钩子（替代已弃用的 @app.on_event）
+
+    合并了原来两个 startup 的职责：扫描曲库 + 周期性 GC + 后台预热。
+    """
+    global ALL_SONGS, ARTISTS
+    ALL_SONGS, ARTISTS = scan_all()
+    # 老式 song_id 命名的分离目录改为「原文件名_C/G」
+    stems_mod.migrate_legacy({s.id: s.file_path for s in ALL_SONGS})
+    print(f"[Server] 启动完成，{len(ALL_SONGS)} 首歌就绪")
+
+    async def periodic_gc() -> None:
+        while True:
+            await asyncio.sleep(300)
+            collected = gc.collect()
+            if collected > 0:
+                print(f"[GC] 回收 {collected} 个对象")
+
+    gc_task = asyncio.create_task(periodic_gc())
+    # GPU 预检测放后台线程：torch 导入耗时 1-2s，避免首次打开效果面板时阻塞
+    threading.Thread(target=stems_mod.has_gpu, daemon=True).start()
+    # 相关视频：预热 B站 连接（首次 DNS/TLS 1-2s，别让第一次双击歌名白等）
+    threading.Thread(target=relink_mod.warmup, daemon=True).start()
+    try:
+        yield
+    finally:
+        gc_task.cancel()
+
+
+app = FastAPI(title="小海蜇音乐播放器", version="2.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,19 +70,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(GZipMiddleware, minimum_size=500)
-
-ALL_SONGS: list[Song] = []
-ARTISTS: list[Artist] = []
-
-
-@app.on_event("startup")
-async def startup():
-    global ALL_SONGS, ARTISTS
-    ALL_SONGS, ARTISTS = scan_all()
-    # 老式 song_id 命名的分离目录改为「原文件名_C/G」
-    stems_mod.migrate_legacy({s.id: s.file_path for s in ALL_SONGS})
-    print(f"[Server] 启动完成，{len(ALL_SONGS)} 首歌就绪")
-
 
 # ═══ 可选依赖：能力探测 + 按需安装（V15）════════════════════════════
 
@@ -57,10 +80,20 @@ def deps_status():
 
 @app.post("/api/deps/install")
 def deps_install(body: dict):
-    r = deps.install(str(body.get("feature") or ""))
+    """variant: auto | cpu | cuda（只有需要 torch 的功能才有意义）"""
+    r = deps.install(str(body.get("feature") or ""), str(body.get("variant") or "auto"))
     if not r.get("ok"):
         raise HTTPException(400, r.get("error") or "安装启动失败")
-    return {"started": True}
+    return {"started": True, "variant": r.get("variant", "")}
+
+
+@app.post("/api/deps/clean")
+def deps_clean(body: dict):
+    """清理可再生缓存（分离结果 / 旋律 / 画像 / 封面缩略图）"""
+    r = deps.clean(str(body.get("target") or ""))
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error") or "清理失败")
+    return r
 
 
 @app.get("/api/deps/job")
@@ -633,22 +666,6 @@ async def refresh_songs():
     new_count = len(ALL_SONGS)
     print(f"[Refresh] {old_count} -> {new_count} ({(new_count - old_count):+d})")
     return {"songs": new_count, "artists": len(ARTISTS), "delta": new_count - old_count}
-
-
-@app.on_event("startup")
-async def setup_gc_timer():
-    import asyncio
-    async def periodic_gc():
-        while True:
-            await asyncio.sleep(300)
-            collected = gc.collect()
-            if collected > 0:
-                print(f"[GC] 回收 {collected} 个对象")
-    asyncio.create_task(periodic_gc())
-    # GPU 预检测放后台线程：torch 导入耗时 1-2s，避免首次打开效果面板时阻塞请求
-    threading.Thread(target=stems_mod.has_gpu, daemon=True).start()
-    # 相关视频：预热 B站 连接（首次 DNS/TLS 1-2s，别让第一次双击歌名白等）
-    threading.Thread(target=relink_mod.warmup, daemon=True).start()
 
 
 if __name__ == "__main__":

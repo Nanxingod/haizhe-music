@@ -1,6 +1,6 @@
 // 音乐播放器 - 主应用
 
-import { useEffect } from 'react';
+import { useEffect, lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { PlayerProvider } from './store';
 import { Sidebar } from './components/Sidebar';
@@ -8,15 +8,19 @@ import { TitleBar } from './components/TitleBar';
 import { PlayerBar } from './components/PlayerBar';
 import { MediaSessionBridge } from './components/MediaSessionBridge';
 import { LibraryProvider } from './libraryStore';
-import { LibraryPage } from './pages/LibraryPage';
 import { Onboarding } from './components/Onboarding';
-import { InsightsPage } from './pages/InsightsPage';
 import { bindPipLockSync } from './pipLock';
-import { AllSongsPage } from './pages/AllSongsPage';
-import { ArtistsPage } from './pages/ArtistsPage';
-import { ArtistSongsPage } from './pages/ArtistSongsPage';
-import { SearchPage } from './pages/SearchPage';
-import { SettingsPage } from './pages/SettingsPage';
+
+// 按路由拆分：原来单包 618KB（超 Vite 500KB 警告线），
+// 首次进首页要把设置/画像/歌单这些用不到的都下载一遍。
+// 注意：这些页面都是具名导出，lazy 需要转成 default。
+const AllSongsPage = lazy(() => import('./pages/AllSongsPage').then(m => ({ default: m.AllSongsPage })));
+const ArtistsPage = lazy(() => import('./pages/ArtistsPage').then(m => ({ default: m.ArtistsPage })));
+const ArtistSongsPage = lazy(() => import('./pages/ArtistSongsPage').then(m => ({ default: m.ArtistSongsPage })));
+const SearchPage = lazy(() => import('./pages/SearchPage').then(m => ({ default: m.SearchPage })));
+const LibraryPage = lazy(() => import('./pages/LibraryPage').then(m => ({ default: m.LibraryPage })));
+const InsightsPage = lazy(() => import('./pages/InsightsPage').then(m => ({ default: m.InsightsPage })));
+const SettingsPage = lazy(() => import('./pages/SettingsPage').then(m => ({ default: m.SettingsPage })));
 
 // ⚡ V12.5: 启动时立即应用背景样式（含 follow 模式 / 对比度 / 模糊）
 export interface BgAdjust { dim: number; contrast?: number; blur?: number; }
@@ -118,6 +122,7 @@ export default function App() {
           <div className="flex flex-1 overflow-hidden relative">
             <Sidebar />
             <main className="flex-1 overflow-hidden flex flex-col relative">
+              <Suspense fallback={<div className="px-8 py-10 text-[13px] text-white/25">加载中…</div>}>
               <Routes>
                 <Route path="/" element={<AllSongsPage />} />
                 <Route path="/artists" element={<ArtistsPage />} />
@@ -129,6 +134,7 @@ export default function App() {
                 <Route path="/insights" element={<InsightsPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>
+              </Suspense>
             </main>
           </div>
           <div className="relative shrink-0">

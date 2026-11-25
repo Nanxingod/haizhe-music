@@ -1,4 +1,5 @@
 {
-  "_comment": "首次启动的三步向导会自动生成 config.json；也可以手动复制本文件后修改。music_dir 留空表示使用系统音乐文件夹（~/Music）。",
-  "music_dir": ""
+  "_comment": "首次启动的三步向导会自动生成 config.json；也可以手动复制本文件后修改。music_dir 留空表示使用系统音乐文件夹（~/Music）。deps_dir 留空表示用 %LOCALAPPDATA%\\Haizhe\\deps；想避免占 C 盘可以改成 D:\\Haizhe\\deps（重启后端生效）。",
+  "music_dir": "",
+  "deps_dir": ""
 }

@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, memo } from 'react';
 import { api, API_BASE } from '../api';
 import { usePlayer } from '../store';
-import type { StemItem, RelinkConfig } from '../types';
+import type { StemItem, RelinkConfig, DepsInfo } from '../types';
 import { applyBgStyle, type BgAdjust } from '../App';
 import { SKINS, applySkin, currentSkin, type SkinId } from '../skin';
 import { isPipLocked, setPipLocked } from '../pipLock';
@@ -102,7 +102,8 @@ export const SettingsPage = memo(function SettingsPage() {
   const [lyricBusy, setLyricBusy] = useState(false);
   const [lyricMsg, setLyricMsg] = useState('');
   const [lyricFails, setLyricFails] = useState<string[]>([]);
-  const [depsInfo, setDepsInfo] = useState<any>(null);
+  const [depsInfo, setDepsInfo] = useState<DepsInfo | null>(null);
+  const [cleanMsg, setCleanMsg] = useState('');
   const [depJob, setDepJob] = useState<any>(null);
   // AI 接口密钥（相关视频检索用）
   const [relinkCfg, setRelinkCfg] = useState<RelinkConfig | null>(null);
@@ -411,64 +412,154 @@ export const SettingsPage = memo(function SettingsPage() {
         <section className="glass-light rounded-2xl p-5 space-y-3">
           <h2 className="text-lg font-semibold">🧩 功能组件<span className="text-white/25 text-sm font-normal ml-2">按需安装</span></h2>
           <p className="text-xs text-white/25 leading-relaxed">
-            Python 依赖（人声分离 / 旋律 / 拼音）默认<b className="text-white/40">不随程序下载</b>，
-            装在 <code className="text-white/40">{depsInfo?.deps_dir || '%LOCALAPPDATA%\\Haizhe\\deps'}</code>；
-            桌面模式组件（Electron）会装回项目的 <code className="text-white/40">node_modules</code>。
-            都是点一下就装，不影响正常播放。
+            Python 依赖（人声分离 / 旋律）默认<b className="text-white/40">不随程序下载</b>，装在
+            <code className="text-white/40"> {depsInfo?.deps_dir || '%LOCALAPPDATA%\\Haizhe\\deps'}</code>
+            {depsInfo?.deps_dir_source === 'config' && '（config.json 指定）'}
+            {depsInfo?.deps_dir_source === 'env' && '（环境变量指定）'}；
+            桌面模式（Electron）装回项目的 <code className="text-white/40">node_modules</code>。
           </p>
 
+          {/* 实际生效的硬件 / torch —— 装完一定要能回读，否则"装了但没用上"没人发现 */}
+          {depsInfo && (
+            <div className="rounded-xl bg-white/4 border border-white/6 px-3.5 py-2.5 space-y-1">
+              <p className="text-[11px] text-white/45">
+                {depsInfo.gpu?.available
+                  ? `显卡：${depsInfo.gpu?.name}${depsInfo.gpu?.memory_mb ? ` · ${(depsInfo.gpu?.memory_mb / 1024).toFixed(0)}GB` : ''}`
+                  : '未检测到 NVIDIA 显卡（分离/旋律只能走 CPU）'}
+              </p>
+              <p className="text-[11px] text-white/45">
+                {depsInfo.torch?.installed
+                  ? `torch ${depsInfo.torch?.version} · ${depsInfo.torch?.cuda ? `CUDA ${depsInfo.torch?.cuda_version || '可用'}` : 'CPU 版'}`
+                  : 'torch 未安装（用到分离 / 旋律时才装）'}
+              </p>
+              {depsInfo.torch?.installed && (depsInfo.torch?.where || depsInfo.torch?.file) && (
+                <p className="text-[10px] text-white/20 break-all">
+                  位置：{depsInfo.torch?.where || depsInfo.torch?.file}
+                </p>
+              )}
+              {depsInfo.torch?.installed && depsInfo.gpu?.available && !depsInfo.torch?.cuda && (
+                <p className="text-[11px] text-amber-300/70 leading-relaxed">
+                  有 NVIDIA 显卡，但当前是 CPU 版 torch —— GPU 加速用不上。重装时请选「CUDA 版」。
+                </p>
+              )}
+              {depsInfo.torch_ok === false && (
+                <p className="text-[11px] text-red-300/70">torch 版本低于 2.0，人声分离会直接失败</p>
+              )}
+            </div>
+          )}
+
           {!depsInfo ? (
-            <button onClick={async () => { try { setDepsInfo(await api.getDeps()); } catch {} }}
-              className="px-4 py-2 rounded-xl text-sm bg-white/5 text-white/60 hover:bg-white/10 transition-colors">
-              检查组件状态
-            </button>
+            <div className="flex items-center gap-3">
+              <button onClick={async () => { try { setDepsInfo(await api.getDeps()); } catch {} }}
+                className="px-4 py-2 rounded-xl text-sm bg-white/5 text-white/60 hover:bg-white/10 transition-colors">
+                检查组件状态
+              </button>
+              <span className="text-[11px] text-white/20">首次检测约 3–5 秒（要读显卡与 torch 版本）</span>
+            </div>
           ) : (
             <div className="space-y-1.5">
-              {depsInfo.features.map((f: any) => (
-                <div key={f.key} className="flex items-center gap-3 py-1.5 border-t border-white/6 first:border-0">
-                  <span className={`w-4 text-center ${f.installed ? 'text-[var(--accent)]' : 'text-white/20'}`}>
-                    {f.installed ? '✓' : '·'}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-[13px] text-white/70">
-                      {f.name}
-                      {f.size_hint && <span className="ml-2 text-[10px] text-white/20">{f.size_hint}</span>}
-                    </p>
-                    <p className="text-[11px] text-white/25 truncate">{f.desc}</p>
-                    {f.kind === 'npm' && (
-                      <p className="text-[10px] text-white/20 mt-0.5">
-                        装到 {f.where} · 需要 Node.js 18+
+              {(depsInfo.features ?? []).map((f) => {
+                // 有 N 卡且还没装：让用户自己选变体，别替他决定 2.5GB 的下载
+                const pickVariant = f.needs_torch && depsInfo.gpu?.available && !f.installed;
+                const start = async (variant: 'auto' | 'cpu' | 'cuda') => {
+                  try {
+                    await api.installDep(f.key, variant);
+                    const t = setInterval(async () => {
+                      const j = await api.getDepJob().catch(() => null);
+                      if (j) setDepJob(j);
+                      if (j && !j.running) {
+                        clearInterval(t);
+                        setDepsInfo(await api.getDeps().catch(() => null));
+                      }
+                    }, 1200);
+                  } catch (e) { setDepJob({ error: String((e as Error).message || e) }); }
+                };
+                return (
+                  <div key={f.key} className="flex items-center gap-3 py-1.5 border-t border-white/6 first:border-0">
+                    <span className={`w-4 text-center ${f.installed ? 'text-[var(--accent)]' : 'text-white/20'}`}>
+                      {f.installed ? '✓' : '·'}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] text-white/70">
+                        {f.name}
+                        {f.size_hint && <span className="ml-2 text-[10px] text-white/20">{f.size_hint}</span>}
                       </p>
+                      <p className="text-[11px] text-white/25 truncate">{f.desc}</p>
+                      {f.kind === 'npm' && (
+                        <p className="text-[10px] text-white/20 mt-0.5">
+                          装到 {f.where} · 需要 Node.js 18+
+                        </p>
+                      )}
+                      {f.kind === 'pip' && f.installed && f.where && (
+                        <p className="text-[10px] text-white/20 mt-0.5 truncate">生效位置：{f.where}</p>
+                      )}
+                      {f.version_warn && (
+                        <p className="text-[10px] text-amber-300/70 mt-0.5">{f.version_warn}</p>
+                      )}
+                    </div>
+                    {f.installed ? (
+                      <span className="text-[11px] text-[var(--accent)]/60 shrink-0">已安装</span>
+                    ) : pickVariant ? (
+                      <div className="flex gap-1.5 shrink-0">
+                        <button onClick={() => start('cuda')} disabled={!!depJob?.running}
+                          className="px-2.5 py-1.5 rounded-lg text-[11px] bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 disabled:opacity-40">
+                          CUDA 版
+                        </button>
+                        <button onClick={() => start('cpu')} disabled={!!depJob?.running}
+                          className="px-2.5 py-1.5 rounded-lg text-[11px] bg-white/6 text-white/45 hover:bg-white/10 disabled:opacity-40">
+                          CPU 版
+                        </button>
+                      </div>
+                    ) : (
+                      <button onClick={() => start('auto')} disabled={!!depJob?.running}
+                        className="shrink-0 px-3 py-1.5 rounded-lg text-[12px] bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 disabled:opacity-40">
+                        安装
+                      </button>
                     )}
                   </div>
-                  {f.installed ? (
-                    <span className="text-[11px] text-[var(--accent)]/60 shrink-0">已安装</span>
-                  ) : (
+                );
+              })}
+              {depsInfo.gpu?.available && (depsInfo.features ?? []).some(f => f.needs_torch && !f.installed) && (
+                <p className="text-[10px] text-white/20 leading-relaxed pt-1">
+                  CUDA 版约 2.5GB（来自 download.pytorch.org，含 CUDA 运行库）；CPU 版约 200MB，
+                  但分离一首歌要 20–40 分钟而不是 30 秒。
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* 磁盘账本：只列真实占用，避免一堆 0.0 MB 干扰 */}
+          {(depsInfo?.usage?.length ?? 0) > 0 && (
+            <div className="pt-2 space-y-1 border-t border-white/6">
+              <p className="text-[11px] text-white/35">磁盘占用</p>
+              {(depsInfo?.usage ?? []).filter(u => u.size_mb > 0).map(u => (
+                <div key={u.key} className="flex items-center gap-2 text-[11px]">
+                  <span className="text-white/40 w-[104px] shrink-0">{u.label}</span>
+                  <span className="text-white/30 tabular-nums w-[68px] shrink-0 text-right">{u.size_mb.toFixed(1)} MB</span>
+                  <span className="text-white/15 truncate flex-1">{u.path}</span>
+                  {u.cleanable && (
                     <button
                       onClick={async () => {
+                        const cost = u.key === 'insights'
+                          ? '\n注意：重新分析会再次调用 DeepSeek（约几分钱）。'
+                          : '';
+                        if (!window.confirm(`确定清理「${u.label}」？\n\n会删除 ${u.path}\n释放约 ${u.size_mb.toFixed(1)} MB，之后可重新生成。${cost}`)) return;
                         try {
-                          await api.installDep(f.key);
-                          const t = setInterval(async () => {
-                            const j = await api.getDepJob().catch(() => null);
-                            if (j) setDepJob(j);
-                            if (j && !j.running) {
-                              clearInterval(t);
-                              setDepsInfo(await api.getDeps().catch(() => null));
-                            }
-                          }, 1200);
-                        } catch (e) { setDepJob({ error: String((e as Error).message || e) }); }
+                          const r = await api.cleanDep(u.key);
+                          setDepsInfo(await api.getDeps().catch(() => null));
+                          setDepJob(null);
+                          setCleanMsg(`已清理 ${u.label}，释放 ${r.freed_mb} MB`);
+                        } catch (e) { setCleanMsg('清理失败：' + String((e as Error).message || e)); }
                       }}
-                      disabled={!!depJob?.running}
-                      className="shrink-0 px-3 py-1.5 rounded-lg text-[12px] bg-[var(--accent)]/20 text-[var(--accent)] hover:bg-[var(--accent)]/30 disabled:opacity-40">
-                      安装
-                    </button>
+                      className="shrink-0 text-[10px] text-white/25 hover:text-red-300/70 transition-colors">清理</button>
                   )}
                 </div>
               ))}
-              <p className="text-[11px] text-white/20 pt-1">
-                依赖目录占用 {depsInfo.size_mb} MB
-                {depsInfo.legacy_dir ? '（含旧的 backend/vendor）' : ''}
+              <p className="text-[10px] text-white/20">
+                合计 {(depsInfo?.usage ?? []).reduce((n, u) => n + u.size_mb, 0).toFixed(1)} MB。
+                只有「清理」按钮的项是可再生缓存，删了不影响歌曲文件。
               </p>
+              {cleanMsg && <p className="text-[10px] text-[var(--accent)]/70">{cleanMsg}</p>}
             </div>
           )}
 
@@ -477,9 +568,12 @@ export const SettingsPage = memo(function SettingsPage() {
               {(depJob.log || []).slice(-8).map((l: string, i: number) => <p key={i} className="truncate">{l}</p>)}
             </div>
           )}
+
           {depJob && !depJob.running && depJob.done && (
             <p className={`text-xs ${depJob.ok ? 'text-[var(--accent)]/80' : 'text-red-300/70'}`}>
-              {depJob.ok ? '安装完成，重启应用后生效' : '安装失败：' + (depJob.error || '见日志')}
+              {depJob.ok
+                ? `安装完成${depJob.variant === 'cuda' ? '（CUDA 版已生效）' : depJob.variant === 'cpu' ? '（CPU 版）' : ''}`
+                : '安装失败：' + (depJob.error || '见日志')}
             </p>
           )}
         </section>

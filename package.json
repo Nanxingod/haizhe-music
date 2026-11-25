@@ -1,6 +1,6 @@
 {
   "name": "haizhe-music",
-  "version": "1.0.0",
+  "version": "15.5.0",
   "description": "海蜇音乐 - 个人音乐播放器",
   "main": "electron/main.js",
   "scripts": {
